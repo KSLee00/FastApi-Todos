@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>To-Do List</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+        form { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+        input[type="text"] { flex: 1 1 12rem; padding: .5rem; }
+        ul { list-style: none; padding: 0; }
+        li { display: flex; align-items: center; gap: .5rem; padding: .4rem 0; border-bottom: 1px solid #e5e5e5; }
+        li span { flex: 1; }
+        .done { text-decoration: line-through; color: #888; }
+        #error { color: #b00020; }
+    </style>
+</head>
+<body>
+    <h1>To-Do List</h1>
+    <form id="todo-form">
+        <input type="text" id="title" placeholder="제목 (예: 20231234)" required>
+        <input type="text" id="description" placeholder="설명 (예: 홍길동)">
+        <button type="submit">Add To-Do</button>
+    </form>
+    <p id="error" role="alert" hidden></p>
+    <ul id="todo-list"></ul>
+    <script>
+        const $ = (id) => document.getElementById(id);
+        const listEl = $("todo-list"), errorEl = $("error");
+
+        // 모든 요청을 한 곳에서 처리하고, 실패는 조용히 넘기지 않는다
+        async function api(url, method = "GET", body) {
+          const res = await fetch(url, body
+            ? { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+            : { method });
+          if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+          return res.status === 204 ? null : res.json();
+        }
+
+        // 작업을 실행하고, 실패하면 화면에 이유를 띄운다
+        async function run(what, job) {
+          try {
+            await job();
+            errorEl.hidden = true;
+          } catch (e) {
+            errorEl.textContent = `${what} 실패: ${e.message}`;
+            errorEl.hidden = false;
+          }
+        }
+
+        const load = () => run("목록 불러오기", async () => render(await api("/todos")));
+        const save = (id, todo) => run("수정", async () => { await api(`/todos/${id}`, "PUT", todo); await load(); });
+
+        function button(label, onclick) {
+          return Object.assign(document.createElement("button"), { textContent: label, onclick });
+        }
+
+        function render(todos) {
+          listEl.replaceChildren(...todos.map((todo) => {
+            const check = Object.assign(document.createElement("input"), {
+              type: "checkbox",
+              checked: todo.completed,
+              onchange: () => save(todo.id, { ...todo, completed: check.checked }),
+            });
+            const text = Object.assign(document.createElement("span"), {
+              textContent: `${todo.title} — ${todo.description}`,
+              className: todo.completed ? "done" : "",
+            });
+            const li = document.createElement("li");
+            li.append(check, text, button("Edit", () => edit(todo)), button("Delete", () => remove(todo.id)));
+            return li;
+          }));
+        }
+
+        function edit(todo) {
+          const title = prompt("새 제목:", todo.title);
+          if (title === null) return;
+          const description = prompt("새 설명:", todo.description);
+          if (description === null) return;
+          save(todo.id, { ...todo, title: title.trim(), description: description.trim() });
+        }
+
+        function remove(id) {
+          if (!confirm("정말 삭제할까요?")) return;
+          run("삭제", async () => { await api(`/todos/${id}`, "DELETE"); await load(); });
+        }
+
+        $("todo-form").onsubmit = (event) => {
+          event.preventDefault();
+          run("추가", async () => {
+            await api("/todos", "POST", { title: $("title").value.trim(), description: $("description").value.trim() });
+            event.target.reset();
+            await load();
+          });
+        };
+
+        load();
+    </script>
+</body>
+</html>
