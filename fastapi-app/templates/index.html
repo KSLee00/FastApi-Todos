@@ -5,28 +5,203 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>To-Do List</title>
     <style>
-        body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
-        form { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
-        input[type="text"] { flex: 1 1 12rem; padding: .5rem; }
-        ul { list-style: none; padding: 0; }
-        li { display: flex; align-items: center; gap: .5rem; padding: .4rem 0; border-bottom: 1px solid #e5e5e5; }
-        li span { flex: 1; }
-        .done { text-decoration: line-through; color: #888; }
-        #error { color: #b00020; }
+        :root {
+            --bg: #f3f4f8;
+            --surface: #ffffff;
+            --text: #1b1c24;
+            --muted: #83879a;
+            --line: #e9eaf1;
+            --accent: #4f46e5;
+            --accent-soft: #eef0ff;
+            --danger: #d92d4b;
+            --radius: 14px;
+            --shadow: 0 1px 2px rgba(22, 24, 48, .05), 0 10px 28px rgba(22, 24, 48, .07);
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            font-family: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            max-width: 560px;
+            margin: 3rem auto;
+            padding: 0 1rem 4rem;
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* 제목 + 버전 배지 */
+        .head { display: flex; align-items: center; gap: .6rem; margin-bottom: 1rem; }
+        h1 { font-size: 1.6rem; font-weight: 700; letter-spacing: -.02em; margin: 0; }
+        .version {
+            font-size: .72rem; font-weight: 700; letter-spacing: .01em;
+            color: var(--accent); background: var(--accent-soft);
+            border: 1px solid #d7dbff; border-radius: 99px;
+            padding: .15rem .5rem; white-space: nowrap;
+        }
+
+        /* 진행률 */
+        .progress { margin-bottom: 1.25rem; }
+        .progress-head {
+            display: flex; justify-content: space-between; align-items: baseline;
+            font-size: .82rem; color: var(--muted); margin-bottom: .5rem;
+        }
+        .progress-pct { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--accent); }
+        .progress-track { height: 6px; border-radius: 99px; background: var(--line); overflow: hidden; }
+        .progress-bar {
+            height: 100%; width: 0; border-radius: 99px;
+            background: linear-gradient(90deg, #6366f1, #4f46e5);
+            transition: width .35s ease;
+        }
+
+        button {
+            font: inherit; cursor: pointer; border-radius: 10px;
+            border: 1px solid transparent;
+            transition: background .15s, color .15s, border-color .15s;
+        }
+
+        /* 필터 탭 */
+        .filters { display: flex; gap: .3rem; margin-bottom: 1.25rem; }
+        .filters button {
+            padding: .35rem .85rem; font-size: .85rem;
+            background: transparent; color: var(--muted);
+        }
+        .filters button:hover { background: var(--accent-soft); color: var(--accent); }
+        .filters button.on {
+            background: var(--surface); color: var(--accent); font-weight: 600;
+            border-color: var(--line); box-shadow: var(--shadow);
+        }
+
+        /* 입력 폼 */
+        form {
+            display: flex; gap: .5rem; flex-wrap: wrap;
+            background: var(--surface); border: 1px solid var(--line);
+            border-radius: var(--radius); box-shadow: var(--shadow);
+            padding: .6rem; margin-bottom: 1.25rem;
+        }
+        input[type="text"] {
+            flex: 1 1 10rem; min-width: 0;
+            border: 1px solid transparent; border-radius: 10px;
+            padding: .6rem .7rem; font: inherit; color: inherit;
+            background: transparent; transition: background .15s, border-color .15s;
+        }
+        input[type="text"]::placeholder { color: var(--muted); }
+        input[type="text"]:focus {
+            outline: none; background: var(--accent-soft); border-color: #c7cbff;
+        }
+        form button {
+            flex: 0 0 auto; padding: .6rem 1.1rem; font-weight: 600;
+            background: var(--accent); color: #fff;
+        }
+        form button:hover { background: #4338ca; }
+
+        /* 할 일 카드 */
+        ul { list-style: none; padding: 0; margin: 0; display: grid; gap: .6rem; }
+
+        li {
+            display: flex; align-items: flex-start; gap: .75rem;
+            background: var(--surface); border: 1px solid var(--line);
+            border-radius: var(--radius); box-shadow: var(--shadow);
+            padding: .9rem 1rem;
+            transition: transform .15s ease, box-shadow .15s ease;
+        }
+        li:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 1px 2px rgba(22, 24, 48, .05), 0 14px 30px rgba(22, 24, 48, .1);
+        }
+        li.editing { border-color: #c7cbff; transform: none; }
+
+        input[type="checkbox"] {
+            appearance: none; -webkit-appearance: none;
+            flex: 0 0 auto; width: 1.2rem; height: 1.2rem; margin: .15rem 0 0;
+            border: 2px solid #cfd2e2; border-radius: 6px; cursor: pointer;
+            display: grid; place-content: center;
+            transition: background .15s, border-color .15s;
+        }
+        input[type="checkbox"]:hover { border-color: var(--accent); }
+        input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+        input[type="checkbox"]:checked::after {
+            content: ""; width: .32rem; height: .62rem;
+            border: solid #fff; border-width: 0 2px 2px 0;
+            transform: translateY(-1px) rotate(45deg);
+        }
+
+        .body { flex: 1; min-width: 0; }
+        .title { font-weight: 600; word-break: break-word; }
+        .desc { font-size: .85rem; color: var(--muted); word-break: break-word; }
+
+        li.done .title, li.done .desc { color: var(--muted); text-decoration: line-through; }
+
+        /* 인라인 편집 입력창 */
+        .edit-input {
+            display: block; width: 100%;
+            border: 1px solid var(--line); border-radius: 8px;
+            padding: .35rem .5rem; font: inherit; color: inherit;
+            background: var(--bg);
+        }
+        .edit-input:focus { outline: none; border-color: var(--accent); background: #fff; }
+        .edit-title { font-weight: 600; margin-bottom: .35rem; }
+        .edit-desc { font-size: .85rem; }
+
+        .actions { display: flex; gap: .3rem; flex: 0 0 auto; }
+        .actions button {
+            padding: .35rem .6rem; font-size: .8rem;
+            background: transparent; color: var(--muted);
+        }
+        .actions button:hover { background: var(--accent-soft); color: var(--accent); }
+        .actions .delete:hover { background: #fdecef; color: var(--danger); }
+        .actions .save { background: var(--accent); color: #fff; font-weight: 600; }
+        .actions .save:hover { background: #4338ca; color: #fff; }
+
+        .empty {
+            text-align: center; color: var(--muted); font-size: .9rem;
+            padding: 2.5rem 1rem;
+            border: 1px dashed var(--line); border-radius: var(--radius);
+        }
+
+        #error {
+            background: #fdecef; color: var(--danger);
+            border: 1px solid #f7ccd5; border-radius: 10px;
+            padding: .6rem .8rem; font-size: .88rem; margin: 0 0 1rem;
+        }
     </style>
 </head>
 <body>
-    <h1>To-Do List</h1>
+    <div class="head">
+        <h1>To-Do List</h1>
+        <span class="version" id="version">v…</span>
+    </div>
+
+    <div class="progress">
+        <div class="progress-head">
+            <span id="progress-label">전체 0개 · 완료 0개</span>
+            <span class="progress-pct" id="progress-pct">0%</span>
+        </div>
+        <div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div>
+    </div>
+
+    <div class="filters" id="filters">
+        <button type="button" class="on" data-filter="all">전체</button>
+        <button type="button" data-filter="active">미완료</button>
+        <button type="button" data-filter="done">완료</button>
+    </div>
+
     <form id="todo-form">
-        <input type="text" id="title" placeholder="제목 (예: 20231234)" required>
-        <input type="text" id="description" placeholder="설명 (예: 홍길동)">
-        <button type="submit">Add To-Do</button>
+        <input type="text" id="title" placeholder="제목 (예: 20231234)" maxlength="100" required>
+        <input type="text" id="description" placeholder="설명 (예: 홍길동)" maxlength="500">
+        <button type="submit">추가</button>
     </form>
     <p id="error" role="alert" hidden></p>
     <ul id="todo-list"></ul>
+
     <script>
         const $ = (id) => document.getElementById(id);
         const listEl = $("todo-list"), errorEl = $("error");
+
+        let todos = [];            // 서버에서 받아온 전체 목록
+        let filter = "all";        // all | active | done
+        let editingId = null;      // 인라인 편집 중인 항목의 id
 
         // 모든 요청을 한 곳에서 처리하고, 실패는 조용히 넘기지 않는다
         async function api(url, method = "GET", body) {
@@ -43,41 +218,113 @@
             await job();
             errorEl.hidden = true;
           } catch (e) {
-            errorEl.textContent = `${what} 실패: ${e.message}`;
-            errorEl.hidden = false;
+            fail(`${what} 실패: ${e.message}`);
           }
         }
 
-        const load = () => run("목록 불러오기", async () => render(await api("/todos")));
+        function fail(message) {
+          errorEl.textContent = message;
+          errorEl.hidden = false;
+        }
+
+        const load = () => run("목록 불러오기", async () => { todos = await api("/todos"); render(); });
         const save = (id, todo) => run("수정", async () => { await api(`/todos/${id}`, "PUT", todo); await load(); });
 
-        function button(label, onclick) {
-          return Object.assign(document.createElement("button"), { textContent: label, onclick });
+        function el(tag, className, textContent) {
+          return Object.assign(document.createElement(tag), { className, textContent });
         }
 
-        function render(todos) {
-          listEl.replaceChildren(...todos.map((todo) => {
-            const check = Object.assign(document.createElement("input"), {
-              type: "checkbox",
-              checked: todo.completed,
-              onchange: () => save(todo.id, { ...todo, completed: check.checked }),
-            });
-            const text = Object.assign(document.createElement("span"), {
-              textContent: `${todo.title} — ${todo.description}`,
-              className: todo.completed ? "done" : "",
-            });
-            const li = document.createElement("li");
-            li.append(check, text, button("Edit", () => edit(todo)), button("Delete", () => remove(todo.id)));
-            return li;
-          }));
+        function button(label, className, onclick) {
+          return Object.assign(el("button", className, label), { type: "button", onclick });
         }
 
-        function edit(todo) {
-          const title = prompt("새 제목:", todo.title);
-          if (title === null) return;
-          const description = prompt("새 설명:", todo.description);
-          if (description === null) return;
-          save(todo.id, { ...todo, title: title.trim(), description: description.trim() });
+        // 완료 개수를 세어 상단 막대에 반영한다 — 필터와 무관하게 항상 전체 기준
+        function renderProgress() {
+          const done = todos.filter((todo) => todo.completed).length;
+          const percent = todos.length ? Math.round((done / todos.length) * 100) : 0;
+          $("progress-label").textContent = `전체 ${todos.length}개 · 완료 ${done}개`;
+          $("progress-pct").textContent = `${percent}%`;
+          $("progress-bar").style.width = `${percent}%`;
+        }
+
+        function visible() {
+          if (filter === "active") return todos.filter((todo) => !todo.completed);
+          if (filter === "done") return todos.filter((todo) => todo.completed);
+          return todos;
+        }
+
+        // 평소 모습 — 체크박스 + 제목/설명 + 수정/삭제
+        function viewRow(todo) {
+          const check = Object.assign(document.createElement("input"), {
+            type: "checkbox",
+            checked: todo.completed,
+            onchange: () => save(todo.id, { ...todo, completed: check.checked }),
+          });
+
+          const body = el("div", "body");
+          body.append(el("div", "title", todo.title));
+          if (todo.description) body.append(el("div", "desc", todo.description));
+
+          const actions = el("div", "actions");
+          actions.append(
+            button("수정", "edit", () => { editingId = todo.id; render(); }),
+            button("삭제", "delete", () => remove(todo.id)),
+          );
+
+          const li = el("li", todo.completed ? "done" : "");
+          li.append(check, body, actions);
+          return li;
+        }
+
+        // 편집 모습 — 제목/설명이 입력창으로 바뀌고 저장/취소가 붙는다
+        function editRow(todo) {
+          const titleInput = Object.assign(document.createElement("input"), {
+            type: "text", className: "edit-input edit-title", value: todo.title, maxLength: 100,
+          });
+          const descInput = Object.assign(document.createElement("input"), {
+            type: "text", className: "edit-input edit-desc", value: todo.description,
+            maxLength: 500, placeholder: "설명",
+          });
+
+          const commit = () => {
+            const title = titleInput.value.trim();
+            if (!title) {                       // 빈 제목은 서버가 거부하므로 미리 막는다
+              fail("제목을 입력해 주세요.");
+              titleInput.focus();
+              return;
+            }
+            editingId = null;
+            save(todo.id, { ...todo, title, description: descInput.value.trim() });
+          };
+          const cancel = () => { editingId = null; errorEl.hidden = true; render(); };
+
+          // Enter 로 저장, Esc 로 취소
+          titleInput.onkeydown = descInput.onkeydown = (event) => {
+            if (event.key === "Enter") commit();
+            if (event.key === "Escape") cancel();
+          };
+
+          const body = el("div", "body");
+          body.append(titleInput, descInput);
+
+          const actions = el("div", "actions");
+          actions.append(button("저장", "save", commit), button("취소", "cancel", cancel));
+
+          const li = el("li", "editing");
+          li.append(body, actions);
+          return li;
+        }
+
+        function render() {
+          const rows = visible();
+          if (rows.length) {
+            listEl.replaceChildren(...rows.map((todo) => todo.id === editingId ? editRow(todo) : viewRow(todo)));
+          } else {
+            const messages = { all: "할 일이 없습니다. 위에서 추가해 보세요.", active: "미완료 항목이 없습니다.", done: "완료한 항목이 없습니다." };
+            listEl.replaceChildren(el("li", "empty", messages[filter]));
+          }
+          renderProgress();
+          listEl.querySelector(".edit-title")?.focus();   // 편집 시작 시 제목에 커서
         }
 
         function remove(id) {
@@ -85,15 +332,31 @@
           run("삭제", async () => { await api(`/todos/${id}`, "DELETE"); await load(); });
         }
 
+        $("filters").onclick = (event) => {
+          const target = event.target.closest("button[data-filter]");
+          if (!target) return;
+          filter = target.dataset.filter;
+          editingId = null;
+          [...$("filters").children].forEach((b) => b.classList.toggle("on", b === target));
+          render();
+        };
+
         $("todo-form").onsubmit = (event) => {
           event.preventDefault();
+          const title = $("title").value.trim();
+          if (!title) {                         // 공백만 입력한 경우 — required 가 못 잡는다
+            fail("제목을 입력해 주세요.");
+            return;
+          }
           run("추가", async () => {
-            await api("/todos", "POST", { title: $("title").value.trim(), description: $("description").value.trim() });
+            await api("/todos", "POST", { title, description: $("description").value.trim() });
             event.target.reset();
             await load();
           });
         };
 
+        // 버전은 서버가 알려준다 (main.py 의 APP_VERSION 이 단일 출처)
+        run("버전 확인", async () => { $("version").textContent = `v${(await api("/version")).version}`; });
         load();
     </script>
 </body>

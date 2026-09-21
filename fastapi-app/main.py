@@ -1,9 +1,12 @@
 import json
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+
+APP_VERSION = "2.0.0"                            # 화면 배지와 /version 이 함께 쓰는 단일 출처
 
 BASE_DIR = Path(__file__).resolve().parent       # main.py 가 있는 폴더
 TODO_FILE = BASE_DIR / "todo.json"
@@ -12,12 +15,12 @@ INDEX_FILE = BASE_DIR / "templates" / "index.html"
 if not TODO_FILE.exists():                       # 없으면 빈 목록으로 만들어 둔다
     TODO_FILE.write_text("[]", encoding="utf-8")
 
-app = FastAPI(title="To-Do List API")
+app = FastAPI(title="To-Do List API", version=APP_VERSION)
 
 
 class TodoIn(BaseModel):                         # 클라이언트가 보내는 데이터 (id 없음)
     title: str = Field(min_length=1, max_length=100)
-    description: str = ""
+    description: str = Field("", max_length=500)
     completed: bool = False
 
 
@@ -32,7 +35,11 @@ def load_todos() -> list[TodoItem]:
 
 def save_todos(todos: list[TodoItem]) -> None:
     data = json.dumps([t.model_dump() for t in todos], indent=2, ensure_ascii=False)
-    TODO_FILE.write_text(data, encoding="utf-8")
+    # 원본을 직접 덮어쓰면 쓰는 도중 중단됐을 때 파일이 깨진다.
+    # 임시 파일에 먼저 쓰고 통째로 갈아끼운다 (os.replace 는 원자적 연산).
+    tmp_file = TODO_FILE.with_name(TODO_FILE.name + ".tmp")
+    tmp_file.write_text(data, encoding="utf-8")
+    os.replace(tmp_file, TODO_FILE)
 
 
 def find_index(todos: list[TodoItem], todo_id: int) -> int:
@@ -59,8 +66,9 @@ def create_todo(payload: TodoIn) -> TodoItem:
 @app.put("/todos/{todo_id}")                     # 수정
 def update_todo(todo_id: int, payload: TodoIn) -> TodoItem:
     todos = load_todos()
+    index = find_index(todos, todo_id)           # 없는 id 면 여기서 404
     todo = TodoItem(id=todo_id, **payload.model_dump())
-    todos[find_index(todos, todo_id)] = todo
+    todos[index] = todo
     save_todos(todos)
     return todo
 
@@ -70,6 +78,11 @@ def delete_todo(todo_id: int) -> None:
     todos = load_todos()
     del todos[find_index(todos, todo_id)]
     save_todos(todos)
+
+
+@app.get("/version")                             # 화면 배지가 읽어가는 앱 버전
+def get_version() -> dict[str, str]:
+    return {"version": APP_VERSION}
 
 
 @app.get("/", include_in_schema=False)           # 화면 서빙
