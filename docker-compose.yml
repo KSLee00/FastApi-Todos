@@ -1,0 +1,13 @@
+services:
+  fastapi-app:
+    build:
+      context: ./fastapi-app      # Dockerfile이 위치한 디렉토리 경로
+      dockerfile: Dockerfile      # Dockerfile 이름 (생략 가능, 기본값은 'Dockerfile')
+    container_name: FastApi-app
+    ports:
+      - "5001:8000"
+    restart: unless-stopped       # 서버 재부팅·오류 시 자동 재시작
+    security_opt:
+      - no-new-privileges:true    # 컨테이너 안에서 권한 상승 차단
+    cap_drop:
+      - ALL                       # 불필요한 커널 권한 모두 제거
