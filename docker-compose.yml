@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile      # Dockerfile 이름 (생략 가능, 기본값은 'Dockerfile')
     container_name: FastApi-app
     ports:
-      - "5001:8000"
+      - "8032:8000"
     restart: unless-stopped       # 서버 재부팅·오류 시 자동 재시작
     security_opt:
       - no-new-privileges:true    # 컨테이너 안에서 권한 상승 차단
