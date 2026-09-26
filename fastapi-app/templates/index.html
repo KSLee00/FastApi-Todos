@@ -96,6 +96,38 @@
         }
         form button:hover { background: #4338ca; }
 
+        /* 마감일 · 우선순위 선택 */
+        input[type="date"], select {
+            font: inherit; font-size: .85rem; color: inherit;
+            border: 1px solid var(--line); border-radius: 10px;
+            padding: .45rem .6rem; background: var(--surface);
+        }
+        input[type="date"]:focus, select:focus { outline: none; border-color: var(--accent); }
+        form input[type="date"] { flex: 1 1 8rem; min-width: 0; }
+        form select { flex: 0 0 auto; }
+
+        /* 필터 + 정렬 한 줄 */
+        .toolbar { display: flex; justify-content: space-between; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
+        .toolbar .filters { margin-bottom: 0; }
+        .sort { font-size: .82rem; color: var(--muted); display: flex; align-items: center; gap: .35rem; }
+        .sort select { padding: .3rem .5rem; font-size: .82rem; }
+
+        /* 우선순위 · 마감일 배지 */
+        .meta { display: flex; gap: .35rem; flex-wrap: wrap; margin-top: .35rem; }
+        .badge {
+            font-size: .72rem; font-weight: 600; line-height: 1.4;
+            border-radius: 99px; padding: .08rem .5rem; border: 1px solid transparent;
+        }
+        .p-high   { color: #b42318; background: #fef0ee; border-color: #fbd3cd; }
+        .p-medium { color: #b54708; background: #fff6e6; border-color: #fde3b5; }
+        .p-low    { color: #067647; background: #ecfdf3; border-color: #bfeccf; }
+        .due      { color: var(--muted); background: var(--bg); border-color: var(--line); }
+        .due.today   { color: var(--accent); background: var(--accent-soft); border-color: #d7dbff; }
+        .due.overdue { color: var(--danger); background: #fdecef; border-color: #f7ccd5; }
+        li.overdue { border-left: 3px solid var(--danger); }
+        li.done .badge { opacity: .55; }
+        .edit-meta { display: flex; gap: .35rem; margin-top: .35rem; flex-wrap: wrap; }
+
         /* 할 일 카드 */
         ul { list-style: none; padding: 0; margin: 0; display: grid; gap: .6rem; }
 
@@ -181,15 +213,30 @@
         <div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div>
     </div>
 
-    <div class="filters" id="filters">
-        <button type="button" class="on" data-filter="all">전체</button>
-        <button type="button" data-filter="active">미완료</button>
-        <button type="button" data-filter="done">완료</button>
+    <div class="toolbar">
+        <div class="filters" id="filters">
+            <button type="button" class="on" data-filter="all">전체</button>
+            <button type="button" data-filter="active">미완료</button>
+            <button type="button" data-filter="done">완료</button>
+        </div>
+        <label class="sort">정렬
+            <select id="sort">
+                <option value="created">추가순</option>
+                <option value="due">마감일순</option>
+                <option value="priority">우선순위순</option>
+            </select>
+        </label>
     </div>
 
     <form id="todo-form">
         <input type="text" id="title" placeholder="제목 (예: 20231234)" maxlength="100" required>
         <input type="text" id="description" placeholder="설명 (예: 홍길동)" maxlength="500">
+        <input type="date" id="due-date" title="마감일 (선택)">
+        <select id="priority" title="우선순위">
+            <option value="high">높음</option>
+            <option value="medium" selected>보통</option>
+            <option value="low">낮음</option>
+        </select>
         <button type="submit">추가</button>
     </form>
     <p id="error" role="alert" hidden></p>
@@ -202,6 +249,28 @@
         let todos = [];            // 서버에서 받아온 전체 목록
         let filter = "all";        // all | active | done
         let editingId = null;      // 인라인 편집 중인 항목의 id
+        let sortBy = "created";    // created | due | priority
+
+        const PRIORITY = { high: "높음", medium: "보통", low: "낮음" };
+        const RANK = { high: 0, medium: 1, low: 2 };
+
+        // 오늘 날짜를 로컬 기준 "YYYY-MM-DD" 로 — toISOString 은 UTC 라 자정 근처에 하루 밀린다
+        function today() {
+          const d = new Date();
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        }
+
+        // 마감일까지 남은 일수 (지났으면 음수)
+        const daysLeft = (due) => Math.round((Date.parse(due) - Date.parse(today())) / 86400000);
+        const isOverdue = (todo) => !todo.completed && todo.due_date && todo.due_date < today();
+
+        function dueBadge(todo) {
+          const n = daysLeft(todo.due_date);
+          const [, m, d] = todo.due_date.split("-").map(Number);
+          const when = n === 0 ? "오늘 마감" : n > 0 ? `D-${n}` : `${-n}일 지남`;
+          const state = todo.completed ? "" : n < 0 ? " overdue" : n === 0 ? " today" : "";
+          return el("span", `badge due${state}`, `${m}/${d} · ${when}`);
+        }
 
         // 모든 요청을 한 곳에서 처리하고, 실패는 조용히 넘기지 않는다
         async function api(url, method = "GET", body) {
@@ -247,10 +316,22 @@
           $("progress-bar").style.width = `${percent}%`;
         }
 
+        // 마감일 없는 항목은 마감일순에서 맨 뒤로 보낸다
+        const byDue = (a, b) => (a.due_date || "9999-12-31").localeCompare(b.due_date || "9999-12-31");
+        const byPriority = (a, b) => RANK[a.priority] - RANK[b.priority];
+        const byId = (a, b) => a.id - b.id;
+        const SORTERS = {
+          created: [byId],
+          due: [byDue, byPriority, byId],
+          priority: [byPriority, byDue, byId],
+        };
+
         function visible() {
-          if (filter === "active") return todos.filter((todo) => !todo.completed);
-          if (filter === "done") return todos.filter((todo) => todo.completed);
-          return todos;
+          let rows = todos;
+          if (filter === "active") rows = todos.filter((todo) => !todo.completed);
+          if (filter === "done") rows = todos.filter((todo) => todo.completed);
+          const compare = SORTERS[sortBy];
+          return [...rows].sort((a, b) => compare.reduce((r, fn) => r || fn(a, b), 0));
         }
 
         // 평소 모습 — 체크박스 + 제목/설명 + 수정/삭제
@@ -265,18 +346,30 @@
           body.append(el("div", "title", todo.title));
           if (todo.description) body.append(el("div", "desc", todo.description));
 
+          const meta = el("div", "meta");
+          meta.append(el("span", `badge p-${todo.priority}`, PRIORITY[todo.priority]));
+          if (todo.due_date) meta.append(dueBadge(todo));
+          body.append(meta);
+
           const actions = el("div", "actions");
           actions.append(
             button("수정", "edit", () => { editingId = todo.id; render(); }),
             button("삭제", "delete", () => remove(todo.id)),
           );
 
-          const li = el("li", todo.completed ? "done" : "");
+          const li = el("li", todo.completed ? "done" : isOverdue(todo) ? "overdue" : "");
           li.append(check, body, actions);
           return li;
         }
 
-        // 편집 모습 — 제목/설명이 입력창으로 바뀌고 저장/취소가 붙는다
+        function priorityPicker(value) {
+          const select = document.createElement("select");
+          select.title = "우선순위";
+          for (const [key, label] of Object.entries(PRIORITY)) select.append(new Option(label, key, false, key === value));
+          return select;
+        }
+
+        // 편집 모습 — 제목/설명/마감일/우선순위가 입력창으로 바뀌고 저장/취소가 붙는다
         function editRow(todo) {
           const titleInput = Object.assign(document.createElement("input"), {
             type: "text", className: "edit-input edit-title", value: todo.title, maxLength: 100,
@@ -285,6 +378,10 @@
             type: "text", className: "edit-input edit-desc", value: todo.description,
             maxLength: 500, placeholder: "설명",
           });
+          const dueInput = Object.assign(document.createElement("input"), {
+            type: "date", value: todo.due_date || "", title: "마감일",
+          });
+          const prioritySelect = priorityPicker(todo.priority);
 
           const commit = () => {
             const title = titleInput.value.trim();
@@ -294,7 +391,10 @@
               return;
             }
             editingId = null;
-            save(todo.id, { ...todo, title, description: descInput.value.trim() });
+            save(todo.id, {
+              ...todo, title, description: descInput.value.trim(),
+              due_date: dueInput.value || null, priority: prioritySelect.value,
+            });
           };
           const cancel = () => { editingId = null; errorEl.hidden = true; render(); };
 
@@ -304,8 +404,11 @@
             if (event.key === "Escape") cancel();
           };
 
+          const editMeta = el("div", "edit-meta");
+          editMeta.append(dueInput, prioritySelect);
+
           const body = el("div", "body");
-          body.append(titleInput, descInput);
+          body.append(titleInput, descInput, editMeta);
 
           const actions = el("div", "actions");
           actions.append(button("저장", "save", commit), button("취소", "cancel", cancel));
@@ -341,6 +444,8 @@
           render();
         };
 
+        $("sort").onchange = (event) => { sortBy = event.target.value; render(); };
+
         $("todo-form").onsubmit = (event) => {
           event.preventDefault();
           const title = $("title").value.trim();
@@ -349,7 +454,10 @@
             return;
           }
           run("추가", async () => {
-            await api("/todos", "POST", { title, description: $("description").value.trim() });
+            await api("/todos", "POST", {
+              title, description: $("description").value.trim(),
+              due_date: $("due-date").value || null, priority: $("priority").value,
+            });
             event.target.reset();
             await load();
           });

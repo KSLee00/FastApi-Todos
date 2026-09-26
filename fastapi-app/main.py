@@ -1,12 +1,14 @@
 import json
 import os
+from datetime import date
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.0.0"                            # 화면 배지와 /version 이 함께 쓰는 단일 출처
+APP_VERSION = "3.0.0"                            # 화면 배지와 /version 이 함께 쓰는 단일 출처
 
 BASE_DIR = Path(__file__).resolve().parent       # main.py 가 있는 폴더
 TODO_FILE = BASE_DIR / "todo.json"
@@ -22,6 +24,8 @@ class TodoIn(BaseModel):                         # 클라이언트가 보내는 
     title: str = Field(min_length=1, max_length=100)
     description: str = Field("", max_length=500)
     completed: bool = False
+    due_date: date | None = None                 # 마감일 (YYYY-MM-DD), 없으면 null
+    priority: Literal["high", "medium", "low"] = "medium"   # 기존 데이터는 "보통"으로 읽힌다
 
 
 class TodoItem(TodoIn):                          # 서버가 돌려주는 데이터 (id 있음)
@@ -34,7 +38,8 @@ def load_todos() -> list[TodoItem]:
 
 
 def save_todos(todos: list[TodoItem]) -> None:
-    data = json.dumps([t.model_dump() for t in todos], indent=2, ensure_ascii=False)
+    # mode="json" 이어야 date 가 "YYYY-MM-DD" 문자열로 바뀐다
+    data = json.dumps([t.model_dump(mode="json") for t in todos], indent=2, ensure_ascii=False)
     # 원본을 직접 덮어쓰면 쓰는 도중 중단됐을 때 파일이 깨진다.
     # 임시 파일에 먼저 쓰고 통째로 갈아끼운다 (os.replace 는 원자적 연산).
     tmp_file = TODO_FILE.with_name(TODO_FILE.name + ".tmp")
