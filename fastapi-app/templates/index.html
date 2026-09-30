@@ -96,15 +96,20 @@
         }
         form button:hover { background: #4338ca; }
 
-        /* 마감일 · 우선순위 선택 */
-        input[type="date"], select {
+        /* 마감일 · 진행도 입력 */
+        input[type="date"], input[type="number"], select {
             font: inherit; font-size: .85rem; color: inherit;
             border: 1px solid var(--line); border-radius: 10px;
             padding: .45rem .6rem; background: var(--surface);
         }
-        input[type="date"]:focus, select:focus { outline: none; border-color: var(--accent); }
+        input[type="date"]:focus, input[type="number"]:focus, select:focus { outline: none; border-color: var(--accent); }
+        form input[type="text"] { flex: 1 1 40%; }   /* 제목·설명이 첫 줄, 마감일·진행도·추가가 둘째 줄 */
         form input[type="date"] { flex: 1 1 8rem; min-width: 0; }
-        form select { flex: 0 0 auto; }
+        .progress-input {
+            flex: 0 0 auto; display: flex; align-items: center; gap: .25rem;
+            font-size: .85rem; color: var(--muted);
+        }
+        .progress-input input { width: 4.2rem; }
 
         /* 필터 + 정렬 한 줄 */
         .toolbar { display: flex; justify-content: space-between; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
@@ -112,15 +117,47 @@
         .sort { font-size: .82rem; color: var(--muted); display: flex; align-items: center; gap: .35rem; }
         .sort select { padding: .3rem .5rem; font-size: .82rem; }
 
-        /* 우선순위 · 마감일 배지 */
-        .meta { display: flex; gap: .35rem; flex-wrap: wrap; margin-top: .35rem; }
+        /* 진행도 · 마감일 배지 */
+        .meta { display: flex; gap: .35rem; flex-wrap: wrap; align-items: center; margin-top: .35rem; }
         .badge {
             font-size: .72rem; font-weight: 600; line-height: 1.4;
             border-radius: 99px; padding: .08rem .5rem; border: 1px solid transparent;
         }
-        .p-high   { color: #b42318; background: #fef0ee; border-color: #fbd3cd; }
-        .p-medium { color: #b54708; background: #fff6e6; border-color: #fde3b5; }
-        .p-low    { color: #067647; background: #ecfdf3; border-color: #bfeccf; }
+        .prog {
+            display: inline-flex; align-items: center; gap: .4rem;
+            color: var(--accent); background: var(--accent-soft); border-color: #d7dbff;
+            font-variant-numeric: tabular-nums;
+        }
+        .prog-track { width: 3rem; height: 4px; border-radius: 99px; background: #d7dbff; overflow: hidden; }
+        .prog-fill { display: block; height: 100%; background: var(--accent); }
+
+        /* 하위 작업 체크리스트 */
+        .subtasks { list-style: none; padding: 0; margin: .5rem 0 0; display: grid; gap: .15rem; }
+        .subtasks li {
+            display: flex; align-items: center; gap: .5rem;
+            background: none; border: 0; border-radius: 8px; box-shadow: none;
+            padding: .15rem .3rem; font-size: .85rem;
+        }
+        .subtasks li:hover { transform: none; box-shadow: none; background: var(--bg); }
+        .subtasks input[type="checkbox"] { width: 1rem; height: 1rem; margin: 0; border-radius: 5px; }
+        .subtasks input[type="checkbox"]:checked::after { width: .26rem; height: .5rem; }
+        .subtasks .sub-title { flex: 1; min-width: 0; word-break: break-word; }
+        .subtasks li.sub-done .sub-title { color: var(--muted); text-decoration: line-through; }
+        .subtasks .sub-remove {
+            padding: 0 .4rem; font-size: .9rem; line-height: 1.4;
+            background: transparent; color: var(--muted); visibility: hidden;
+        }
+        .subtasks li:hover .sub-remove, .subtasks .sub-remove:focus { visibility: visible; }
+        .subtasks .sub-remove:hover { background: #fdecef; color: var(--danger); }
+        input.sub-add {                         /* input[type="text"] 기본 스타일보다 우선 */
+            display: block; width: 100%; margin-top: .35rem;
+            border: 1px dashed var(--line); border-radius: 8px;
+            padding: .3rem .5rem; font: inherit; font-size: .82rem; color: inherit;
+            background: transparent;
+        }
+        input.sub-add:focus { outline: none; border-style: solid; border-color: var(--accent); background: #fff; }
+        input.sub-add::placeholder { color: var(--muted); }
+        .auto-note { font-size: .78rem; color: var(--muted); }
         .due      { color: var(--muted); background: var(--bg); border-color: var(--line); }
         .due.today   { color: var(--accent); background: var(--accent-soft); border-color: #d7dbff; }
         .due.overdue { color: var(--danger); background: #fdecef; border-color: #f7ccd5; }
@@ -223,20 +260,18 @@
             <select id="sort">
                 <option value="created">추가순</option>
                 <option value="due">마감일순</option>
-                <option value="priority">우선순위순</option>
+                <option value="progress">진행도 낮은순</option>
             </select>
         </label>
     </div>
 
     <form id="todo-form">
-        <input type="text" id="title" placeholder="제목 (예: 20231234)" maxlength="100" required>
-        <input type="text" id="description" placeholder="설명 (예: 홍길동)" maxlength="500">
+        <input type="text" id="title" placeholder="제목 (예: 코딩테스트 LV2)" maxlength="100" required>
+        <input type="text" id="description" placeholder="설명 (예: 프로그래머스 3문제)" maxlength="500">
         <input type="date" id="due-date" title="마감일 (선택)">
-        <select id="priority" title="우선순위">
-            <option value="high">높음</option>
-            <option value="medium" selected>보통</option>
-            <option value="low">낮음</option>
-        </select>
+        <label class="progress-input" title="진행도 (0~100%)">
+            <input type="number" id="progress" min="0" max="100" step="1" value="0" required>%
+        </label>
         <button type="submit">추가</button>
     </form>
     <p id="error" role="alert" hidden></p>
@@ -249,10 +284,13 @@
         let todos = [];            // 서버에서 받아온 전체 목록
         let filter = "all";        // all | active | done
         let editingId = null;      // 인라인 편집 중인 항목의 id
-        let sortBy = "created";    // created | due | priority
+        let sortBy = "created";    // created | due | progress
+        let subFocusId = null;     // 하위 작업을 방금 추가한 할 일 — 다시 그린 뒤 입력창에 커서를 돌려준다
 
-        const PRIORITY = { high: "높음", medium: "보통", low: "낮음" };
-        const RANK = { high: 0, medium: 1, low: 2 };
+        const MAX_SUBTASKS = 20;   // main.py 의 MAX_SUBTASKS 와 같게
+
+        // 입력값을 0~100 정수로 맞춘다 — 빈칸이면 0
+        const clampProgress = (value) => Math.min(100, Math.max(0, Math.round(Number(value) || 0)));
 
         // 오늘 날짜를 로컬 기준 "YYYY-MM-DD" 로 — toISOString 은 UTC 라 자정 근처에 하루 밀린다
         function today() {
@@ -318,12 +356,12 @@
 
         // 마감일 없는 항목은 마감일순에서 맨 뒤로 보낸다
         const byDue = (a, b) => (a.due_date || "9999-12-31").localeCompare(b.due_date || "9999-12-31");
-        const byPriority = (a, b) => RANK[a.priority] - RANK[b.priority];
+        const byProgress = (a, b) => a.progress - b.progress;   // 덜 된 일을 위로
         const byId = (a, b) => a.id - b.id;
         const SORTERS = {
           created: [byId],
-          due: [byDue, byPriority, byId],
-          priority: [byPriority, byDue, byId],
+          due: [byDue, byProgress, byId],
+          progress: [byProgress, byDue, byId],
         };
 
         function visible() {
@@ -339,7 +377,11 @@
           const check = Object.assign(document.createElement("input"), {
             type: "checkbox",
             checked: todo.completed,
-            onchange: () => save(todo.id, { ...todo, completed: check.checked }),
+            // 완료로 체크하면 진행도를 100%로, 하위 작업도 모두 체크한다
+            onchange: () => save(todo.id, {
+              ...todo, completed: check.checked, progress: check.checked ? 100 : todo.progress,
+              subtasks: check.checked ? todo.subtasks.map((s) => ({ ...s, done: true })) : todo.subtasks,
+            }),
           });
 
           const body = el("div", "body");
@@ -347,9 +389,9 @@
           if (todo.description) body.append(el("div", "desc", todo.description));
 
           const meta = el("div", "meta");
-          meta.append(el("span", `badge p-${todo.priority}`, PRIORITY[todo.priority]));
+          meta.append(progressBadge(todo));
           if (todo.due_date) meta.append(dueBadge(todo));
-          body.append(meta);
+          body.append(meta, subtaskList(todo));
 
           const actions = el("div", "actions");
           actions.append(
@@ -362,14 +404,69 @@
           return li;
         }
 
-        function priorityPicker(value) {
-          const select = document.createElement("select");
-          select.title = "우선순위";
-          for (const [key, label] of Object.entries(PRIORITY)) select.append(new Option(label, key, false, key === value));
-          return select;
+        // 작은 막대 + 숫자로 진행도를 보여 준다 — 하위 작업이 있으면 "2/3" 도 붙인다
+        function progressBadge(todo) {
+          const fill = el("span", "prog-fill");
+          fill.style.width = `${todo.progress}%`;
+          const track = el("span", "prog-track");
+          track.append(fill);
+          const subs = todo.subtasks;
+          const count = subs.length ? ` · ${subs.filter((s) => s.done).length}/${subs.length}` : "";
+          const badge = el("span", "badge prog");
+          badge.append(track, `진행 ${todo.progress}%${count}`);
+          return badge;
         }
 
-        // 편집 모습 — 제목/설명/마감일/우선순위가 입력창으로 바뀌고 저장/취소가 붙는다
+        // 하위 작업을 바꿔 저장한다 — 진행도는 서버가 다시 계산한다.
+        // 모두 체크되면 할 일도 완료로, 하나라도 풀리면 미완료로 맞춘다.
+        function saveSubtasks(todo, subtasks) {
+          const completed = subtasks.length ? subtasks.every((s) => s.done) : todo.completed;
+          save(todo.id, { ...todo, subtasks, completed });
+        }
+
+        // 하위 작업 체크리스트 + 추가 입력창
+        function subtaskList(todo) {
+          const wrap = el("div", "sub-wrap");
+          const list = el("ul", "subtasks");
+
+          todo.subtasks.forEach((sub, i) => {
+            const check = Object.assign(document.createElement("input"), {
+              type: "checkbox",
+              checked: sub.done,
+              title: "하위 작업 완료",
+              onchange: () => saveSubtasks(todo, todo.subtasks.map((s, j) => j === i ? { ...s, done: check.checked } : s)),
+            });
+            const item = el("li", sub.done ? "sub-done" : "");
+            item.append(
+              check,
+              el("span", "sub-title", sub.title),
+              Object.assign(button("×", "sub-remove", () => saveSubtasks(todo, todo.subtasks.filter((_, j) => j !== i))),
+                { title: "하위 작업 삭제" }),
+            );
+            list.append(item);
+          });
+
+          wrap.append(list);
+          if (todo.subtasks.length < MAX_SUBTASKS) {
+            const input = Object.assign(document.createElement("input"), {
+              type: "text", className: "sub-add", maxLength: 100,
+              placeholder: "+ 하위 작업 추가 (예: 문제 1 풀기) — Enter",
+            });
+            input.dataset.todoId = todo.id;
+            input.onkeydown = (event) => {
+              if (event.key !== "Enter" || event.isComposing) return;   // 한글 조합 중 Enter 는 무시
+              const title = input.value.trim();
+              if (!title) return;
+              subFocusId = todo.id;
+              // 새 단계가 생기면 아직 안 끝난 것이므로 할 일은 미완료가 된다
+              saveSubtasks(todo, [...todo.subtasks, { title, done: false }]);
+            };
+            wrap.append(input);
+          }
+          return wrap;
+        }
+
+        // 편집 모습 — 제목/설명/마감일/진행도가 입력창으로 바뀌고 저장/취소가 붙는다
         function editRow(todo) {
           const titleInput = Object.assign(document.createElement("input"), {
             type: "text", className: "edit-input edit-title", value: todo.title, maxLength: 100,
@@ -381,7 +478,16 @@
           const dueInput = Object.assign(document.createElement("input"), {
             type: "date", value: todo.due_date || "", title: "마감일",
           });
-          const prioritySelect = priorityPicker(todo.priority);
+          const progressInput = Object.assign(document.createElement("input"), {
+            type: "number", min: 0, max: 100, step: 1, value: todo.progress, title: "진행도 (0~100%)",
+          });
+          const progressLabel = el("label", "progress-input");
+          progressLabel.append(progressInput, "%");
+          if (todo.subtasks.length) {             // 하위 작업이 있으면 진행도는 자동 계산
+            progressInput.disabled = true;
+            progressLabel.title = "하위 작업 체크 비율로 자동 계산됩니다";
+            progressLabel.append(el("span", "auto-note", "(자동)"));
+          }
 
           const commit = () => {
             const title = titleInput.value.trim();
@@ -393,19 +499,19 @@
             editingId = null;
             save(todo.id, {
               ...todo, title, description: descInput.value.trim(),
-              due_date: dueInput.value || null, priority: prioritySelect.value,
+              due_date: dueInput.value || null, progress: clampProgress(progressInput.value),
             });
           };
           const cancel = () => { editingId = null; errorEl.hidden = true; render(); };
 
           // Enter 로 저장, Esc 로 취소
-          titleInput.onkeydown = descInput.onkeydown = (event) => {
+          titleInput.onkeydown = descInput.onkeydown = progressInput.onkeydown = (event) => {
             if (event.key === "Enter") commit();
             if (event.key === "Escape") cancel();
           };
 
           const editMeta = el("div", "edit-meta");
-          editMeta.append(dueInput, prioritySelect);
+          editMeta.append(dueInput, progressLabel);
 
           const body = el("div", "body");
           body.append(titleInput, descInput, editMeta);
@@ -428,6 +534,10 @@
           }
           renderProgress();
           listEl.querySelector(".edit-title")?.focus();   // 편집 시작 시 제목에 커서
+          if (subFocusId !== null) {                      // 하위 작업을 연달아 적을 수 있게
+            listEl.querySelector(`.sub-add[data-todo-id="${subFocusId}"]`)?.focus();
+            subFocusId = null;
+          }
         }
 
         function remove(id) {
@@ -456,7 +566,7 @@
           run("추가", async () => {
             await api("/todos", "POST", {
               title, description: $("description").value.trim(),
-              due_date: $("due-date").value || null, priority: $("priority").value,
+              due_date: $("due-date").value || null, progress: clampProgress($("progress").value),
             });
             event.target.reset();
             await load();

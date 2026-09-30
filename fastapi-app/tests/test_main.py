@@ -49,6 +49,68 @@ def test_update_todo():
     assert response.status_code == 200
     assert response.json()["title"] == "Updated"
 
+def test_create_todo_progress_default():
+    response = client.post("/todos", json={"title": "코딩테스트 LV2"})
+    assert response.status_code == 201
+    assert response.json()["progress"] == 0      # 진행도를 안 보내면 0%
+
+@pytest.mark.parametrize("progress", [-1, 101])
+def test_create_todo_progress_out_of_range(progress):
+    response = client.post("/todos", json={"title": "코딩테스트 LV2", "progress": progress})
+    assert response.status_code == 422          # 0~100 범위 밖은 거부
+
+def test_update_todo_progress():
+    save_todos([TodoItem(id=1, title="코딩테스트 LV2")])
+    response = client.put("/todos/1", json={"title": "코딩테스트 LV2", "progress": 60})
+    assert response.status_code == 200
+    assert load_todos()[0].progress == 60        # 파일에도 반영됐는지 확인
+
+def test_old_data_with_priority_still_loads():
+    # v3 데이터에는 priority 가 있고 progress 가 없다 — 오류 없이 0%로 읽혀야 한다
+    main.TODO_FILE.write_text('[{"id": 1, "title": "old", "priority": "high"}]', encoding="utf-8")
+    response = client.get("/todos")
+    assert response.status_code == 200
+    assert response.json()[0]["progress"] == 0
+
+def test_create_todo_subtasks_default_empty():
+    response = client.post("/todos", json={"title": "코딩테스트 LV2"})
+    assert response.json()["subtasks"] == []     # 하위 작업을 안 보내면 빈 목록
+
+def test_subtasks_derive_progress():
+    subtasks = [
+        {"title": "문제 1 풀기", "done": True},
+        {"title": "문제 2 풀기", "done": True},
+        {"title": "문제 3 풀기", "done": False},
+    ]
+    # 클라이언트가 보낸 progress(10)는 무시되고 체크 비율(2/3 = 67%)로 정해진다
+    response = client.post("/todos", json={"title": "코딩테스트 LV2", "progress": 10, "subtasks": subtasks})
+    assert response.status_code == 201
+    assert response.json()["progress"] == 67
+    saved = load_todos()[0]
+    assert [s.title for s in saved.subtasks] == ["문제 1 풀기", "문제 2 풀기", "문제 3 풀기"]
+    assert saved.progress == 67
+
+def test_update_subtask_recomputes_progress():
+    client.post("/todos", json={"title": "코딩테스트 LV2", "subtasks": [{"title": "문제 1"}, {"title": "문제 2"}]})
+    assert load_todos()[0].progress == 0
+    response = client.put("/todos/1", json={
+        "title": "코딩테스트 LV2",
+        "subtasks": [{"title": "문제 1", "done": True}, {"title": "문제 2", "done": True}],
+    })
+    assert response.json()["progress"] == 100
+
+def test_subtask_empty_title_rejected():
+    response = client.post("/todos", json={"title": "코딩테스트 LV2", "subtasks": [{"title": ""}]})
+    assert response.status_code == 422
+
+def test_too_many_subtasks_rejected():
+    subtasks = [{"title": f"문제 {i}"} for i in range(main.MAX_SUBTASKS + 1)]
+    response = client.post("/todos", json={"title": "코딩테스트 LV2", "subtasks": subtasks})
+    assert response.status_code == 422
+
+def test_version_is_4():
+    assert client.get("/version").json() == {"version": "4.0.0"}
+
 def test_update_todo_not_found():
     updated_todo = {"title": "Updated", "description": "Updated description", "completed": True}
     response = client.put("/todos/1", json=updated_todo)

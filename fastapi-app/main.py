@@ -2,13 +2,12 @@ import json
 import os
 from datetime import date
 from pathlib import Path
-from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-APP_VERSION = "3.0.0"                            # 화면 배지와 /version 이 함께 쓰는 단일 출처
+APP_VERSION = "4.0.0"                            # 화면 배지와 /version 이 함께 쓰는 단일 출처
 
 BASE_DIR = Path(__file__).resolve().parent       # main.py 가 있는 폴더
 TODO_FILE = BASE_DIR / "todo.json"
@@ -20,12 +19,29 @@ if not TODO_FILE.exists():                       # 없으면 빈 목록으로 �
 app = FastAPI(title="To-Do List API", version=APP_VERSION)
 
 
+MAX_SUBTASKS = 20
+
+
+class Subtask(BaseModel):                        # 할 일 안의 작은 단계
+    title: str = Field(min_length=1, max_length=100)
+    done: bool = False
+
+
 class TodoIn(BaseModel):                         # 클라이언트가 보내는 데이터 (id 없음)
     title: str = Field(min_length=1, max_length=100)
     description: str = Field("", max_length=500)
     completed: bool = False
     due_date: date | None = None                 # 마감일 (YYYY-MM-DD), 없으면 null
-    priority: Literal["high", "medium", "low"] = "medium"   # 기존 데이터는 "보통"으로 읽힌다
+    progress: int = Field(0, ge=0, le=100)       # 진행도 (0~100%), 기존 데이터는 0%로 읽힌다
+    subtasks: list[Subtask] = Field(default_factory=list, max_length=MAX_SUBTASKS)
+
+    @model_validator(mode="after")
+    def derive_progress(self) -> "TodoIn":
+        # 하위 작업이 있으면 진행도는 체크한 비율로 서버가 정한다 (클라이언트가 보낸 값은 무시)
+        if self.subtasks:
+            done = sum(s.done for s in self.subtasks)
+            self.progress = round(done / len(self.subtasks) * 100)
+        return self
 
 
 class TodoItem(TodoIn):                          # 서버가 돌려주는 데이터 (id 있음)
