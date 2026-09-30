@@ -1,3 +1,7 @@
-fastapi==0.141.1
-uvicorn[standard]==0.53.0
-jinja2==3.1.6
+fastapi>=0.142.0
+starlette>=1.7.0          # CVE-2026-48710(Host 헤더) 등 보안 패치가 들어간 버전
+uvicorn[standard]>=0.54.0
+pytest>=9.0.3             # CVE-2025-71176(임시 디렉터리) 패치 버전
+pytest-cov>=7.1.0
+pytest-html>=4.2.0
+httpx2>=2.13.1            # FastAPI TestClient용 HTTP 클라이언트 (httpx는 deprecated)
