@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -17,6 +18,12 @@ if not TODO_FILE.exists():                       # 없으면 빈 목록으로 �
     TODO_FILE.write_text("[]", encoding="utf-8")
 
 app = FastAPI(title="To-Do List API", version=APP_VERSION)
+
+# 엔드포인트가 일반 def 라서 요청들이 여러 스레드에서 동시에 실행된다.
+# "읽기 → 새 id 계산 → 쓰기" 도중에 다른 요청이 끼어들면 id 가 겹치거나 저장한 내용이 사라지므로,
+# 파일을 다루는 동안에는 한 번에 한 요청만 들어오게 잠근다.
+# (uvicorn 프로세스가 하나일 때만 유효하다. --workers 를 늘리면 파일 잠금이나 DB 가 필요하다.)
+todo_lock = threading.Lock()
 
 
 MAX_SUBTASKS = 20
@@ -72,33 +79,37 @@ def find_index(todos: list[TodoItem], todo_id: int) -> int:
 
 @app.get("/todos")                               # 목록 조회
 def get_todos() -> list[TodoItem]:
-    return load_todos()
+    with todo_lock:                              # Windows 에서는 읽는 중인 파일을 교체할 수 없어서 읽기도 잠근다
+        return load_todos()
 
 
 @app.post("/todos", status_code=201)             # 추가 — id 는 서버가 매긴다
 def create_todo(payload: TodoIn) -> TodoItem:
-    todos = load_todos()
-    new_id = max((t.id for t in todos), default=0) + 1
-    todo = TodoItem(id=new_id, **payload.model_dump())
-    save_todos(todos + [todo])
+    with todo_lock:
+        todos = load_todos()
+        new_id = max((t.id for t in todos), default=0) + 1
+        todo = TodoItem(id=new_id, **payload.model_dump())
+        save_todos(todos + [todo])
     return todo
 
 
 @app.put("/todos/{todo_id}")                     # 수정
 def update_todo(todo_id: int, payload: TodoIn) -> TodoItem:
-    todos = load_todos()
-    index = find_index(todos, todo_id)           # 없는 id 면 여기서 404
-    todo = TodoItem(id=todo_id, **payload.model_dump())
-    todos[index] = todo
-    save_todos(todos)
+    with todo_lock:
+        todos = load_todos()
+        index = find_index(todos, todo_id)       # 없는 id 면 여기서 404 (with 를 빠져나가며 잠금도 풀린다)
+        todo = TodoItem(id=todo_id, **payload.model_dump())
+        todos[index] = todo
+        save_todos(todos)
     return todo
 
 
 @app.delete("/todos/{todo_id}", status_code=204)  # 삭제
 def delete_todo(todo_id: int) -> None:
-    todos = load_todos()
-    del todos[find_index(todos, todo_id)]
-    save_todos(todos)
+    with todo_lock:
+        todos = load_todos()
+        del todos[find_index(todos, todo_id)]
+        save_todos(todos)
 
 
 @app.get("/version")                             # 화면 배지가 읽어가는 앱 버전

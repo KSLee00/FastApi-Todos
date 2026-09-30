@@ -1,14 +1,28 @@
 # 배포된 서버에 실제 HTTP 요청을 보내 API를 확인하는 통합 테스트
-# 실행: BASE_URL=http://[팀 서버 IP]:[port num] pytest integration_tests
+# 실행: BASE_URL=http://[팀 서버 IP]:[port num] EXPECTED_VERSION=4.0.0 pytest integration_tests
+#
+# v1 ~ v4 가 동시에 떠 있어도 이 파일 하나로 모두 검사한다.
+# 먼저 서버 버전을 알아낸 뒤, 그 버전에 없는 기능의 테스트는 skip 한다.
+#   v1: CRUD                     v2: + /version, 설명 500자 제한
+#   v3: + 마감일(due_date)        v4: + 진행도, 하위 작업, 동시 요청 잠금
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx2
 import pytest
 
 
 BASE_URL = os.environ.get("BASE_URL", "http://163.239.77.76:8034").rstrip("/")
+# 이 주소에 떠 있어야 하는 버전 (예: 3.0.0). 비워 두면 버전 일치 검사는 건너뛴다.
+EXPECTED_VERSION = os.environ.get("EXPECTED_VERSION", "")
+
+
+def parse(version):
+    return tuple(int(x) for x in version.split("."))
+
+
 def wait_until_up(http, seconds=30):
     # 배포 직후에는 컨테이너가 아직 뜨는 중일 수 있으므로 응답이 올 때까지 기다림
     for _ in range(seconds):
@@ -29,6 +43,28 @@ def client():
         yield http
 
 
+@pytest.fixture(scope="session")
+def server_version(client):
+    # v1 에는 /version 이 없으므로 404 면 1.0.0 으로 본다
+    response = client.get("/version")
+    if response.status_code == 404:
+        return "1.0.0"
+    assert response.status_code == 200
+    return response.json()["version"]
+
+
+@pytest.fixture(autouse=True)
+def skip_if_older(request, server_version):
+    # @since("4.0.0") 이 붙은 테스트는 그보다 오래된 서버에서 건너뛴다
+    marker = request.node.get_closest_marker("since")
+    if marker and parse(server_version) < parse(marker.args[0]):
+        pytest.skip(f"v{marker.args[0]} 기능 — 이 서버는 v{server_version}")
+
+
+def since(version):
+    return pytest.mark.since(version)          # 마커 등록은 conftest.py
+
+
 @pytest.fixture
 def todo(client):
     # 테스트용 항목을 하나 만들고, 테스트가 끝나면(실패해도) 지움 → 배포 서버의 실제 데이터는 그대로
@@ -38,6 +74,22 @@ def todo(client):
     item = response.json()
     yield item
     client.delete(f"/todos/{item['id']}")  # 테스트 안에서 이미 지웠다면 404가 오지만 상관없음
+
+
+def get_item(client, todo_id):
+    # 응답이 아니라 서버에 "저장된" 값을 확인하기 위해 목록을 다시 읽어 온다
+    response = client.get("/todos")
+    assert response.status_code == 200
+    return next(t for t in response.json() if t["id"] == todo_id)
+
+
+# ---------- 모든 버전 공통 ----------
+
+def test_expected_version_is_deployed(server_version):
+    # 예전 컨테이너가 그대로 떠 있거나 포트를 잘못 연결한 배포 실수를 잡는다
+    if not EXPECTED_VERSION:
+        pytest.skip("EXPECTED_VERSION 이 지정되지 않음")
+    assert server_version == EXPECTED_VERSION
 
 
 def test_index_page(client):
@@ -59,11 +111,103 @@ def test_update(client, todo):
     assert response.json()["completed"] is True
 
 
+def test_update_is_persisted(client, todo):
+    payload = {"title": todo["title"], "description": "persisted", "completed": True}
+    assert client.put(f"/todos/{todo['id']}", json=payload).status_code == 200
+    saved = get_item(client, todo["id"])       # 컨테이너 안에서 파일 쓰기가 막혀 있으면 여기서 드러난다
+    assert saved["description"] == "persisted"
+    assert saved["completed"] is True
+
+
+def test_korean_round_trip(client, todo):
+    payload = {"title": f"{todo['title']} 코딩테스트 LV2", "description": "프로그래머스 3문제 ✅"}
+    assert client.put(f"/todos/{todo['id']}", json=payload).status_code == 200
+    saved = get_item(client, todo["id"])       # 파일 인코딩이 틀리면 글자가 깨져서 돌아온다
+    assert saved["title"] == payload["title"]
+    assert saved["description"] == payload["description"]
+
+
 def test_delete(client, todo):
     assert client.delete(f"/todos/{todo['id']}").status_code == 204
     assert client.delete(f"/todos/{todo['id']}").status_code == 404  # 이미 지운 항목은 404
 
 
+def test_update_not_found(client):
+    missing_id = max((t["id"] for t in client.get("/todos").json()), default=0) + 1000
+    response = client.put(f"/todos/{missing_id}", json={"title": "없는 항목"})
+    assert response.status_code == 404
+
+
 def test_create_invalid(client):
     response = client.post("/todos", json={"description": "제목 없음"})  # 필수 필드 title 누락
     assert response.status_code == 422
+
+
+# ---------- v3 부터 ----------
+
+@since("3.0.0")
+def test_due_date_round_trip(client, todo):
+    payload = {"title": todo["title"], "due_date": "2026-12-31"}
+    assert client.put(f"/todos/{todo['id']}", json=payload).status_code == 200
+    assert get_item(client, todo["id"])["due_date"] == "2026-12-31"
+
+
+# ---------- v4 부터 ----------
+
+@since("4.0.0")
+def test_index_page_is_v4(client):
+    # HTML 이 오는지만 보면 예전 템플릿이 배포돼도 통과하므로 v4 화면의 문구를 확인한다
+    html = client.get("/").text
+    assert "하위 작업 추가" in html
+    assert "코딩테스트 LV2" in html
+
+
+@since("4.0.0")
+def test_progress_is_persisted(client, todo):
+    payload = {"title": todo["title"], "progress": 40}
+    assert client.put(f"/todos/{todo['id']}", json=payload).status_code == 200
+    assert get_item(client, todo["id"])["progress"] == 40
+
+
+@since("4.0.0")
+def test_subtasks_derive_progress(client, todo):
+    payload = {
+        "title": todo["title"],
+        "progress": 5,                         # 하위 작업이 있으면 서버가 무시해야 하는 값
+        "subtasks": [
+            {"title": "문제 1 풀기", "done": True},
+            {"title": "문제 2 풀기", "done": True},
+            {"title": "문제 3 풀기", "done": False},
+        ],
+    }
+    response = client.put(f"/todos/{todo['id']}", json=payload)
+    assert response.status_code == 200
+    assert response.json()["progress"] == 67   # 2/3
+    saved = get_item(client, todo["id"])
+    assert saved["progress"] == 67
+    assert [s["title"] for s in saved["subtasks"]] == ["문제 1 풀기", "문제 2 풀기", "문제 3 풀기"]
+    assert [s["done"] for s in saved["subtasks"]] == [True, True, False]
+
+
+@since("4.0.0")  # v1~v3 에는 잠금이 없어서 실패한다 (이미 배포된 옛 버전이라 고치지 않음)
+def test_concurrent_creates(client):
+    # 동시에 추가해도 id 가 겹치거나 저장한 항목이 사라지면 안 된다 (main.py 의 todo_lock)
+    n = 15
+    prefix = f"통합테스트-동시-{uuid.uuid4().hex[:8]}"
+
+    def create(i):
+        return client.post("/todos", json={"title": f"{prefix}-{i}"})
+
+    with ThreadPoolExecutor(n) as pool:
+        responses = list(pool.map(create, range(n)))
+    try:
+        assert [r.status_code for r in responses] == [201] * n
+        ids = [r.json()["id"] for r in responses]
+        assert len(set(ids)) == n              # id 가 모두 달라야 한다
+        saved = [t for t in client.get("/todos").json() if t["title"].startswith(prefix)]
+        assert len(saved) == n                 # 전부 파일에 남아 있어야 한다
+    finally:
+        # 겹친 id 가 있었어도 이 테스트가 만든 항목은 모두 지운다
+        for t in client.get("/todos").json():
+            if t["title"].startswith(prefix):
+                client.delete(f"/todos/{t['id']}")
