@@ -11,7 +11,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # root가 아닌 실행 전용 사용자 생성
 # /app/data 는 SQLite DB 가 들어갈 볼륨 자리 — 빈 볼륨은 이 폴더의 소유자(appuser)를 물려받는다
 RUN useradd --create-home --uid 10001 appuser \
- && mkdir -p /app/data && chown -R appuser:appuser /app
+ && mkdir -p /app/data \
+ && chown appuser:appuser /app/data \
+ && chmod 755 /app \
+ && chmod 700 /app/data
 
 # 작업 디렉토리 설정
 WORKDIR /app
@@ -23,9 +26,10 @@ RUN pip install -r requirements.txt
 # 실행에 필요한 파일만 복사한다 — 테스트·캐시·가상환경·DB 가 이미지에 들어가지 않는다
 # (폴더 전체를 복사하는 COPY . . 는 SonarQube 가 보안 핫스팟으로 지적한다)
 # 실제 데이터는 이미지가 아니라 /app/data 볼륨에 저장된다
-COPY --chown=appuser:appuser main.py todo.json ./
-COPY --chown=appuser:appuser templates ./templates
-
+COPY --chown=root:root --chmod=644 main.py todo.json ./
+COPY --chown=root:root templates ./templates
+RUN find /app/templates -type d -exec chmod 755 {} + \
+ && find /app/templates -type f -exec chmod 644 {} +
 # 이후 명령은 appuser 권한으로 실행
 USER appuser
 
