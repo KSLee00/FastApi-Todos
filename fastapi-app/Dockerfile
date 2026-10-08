@@ -5,11 +5,13 @@ FROM python:3.13-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TODO_DATA_DIR=/app/data
 
 # root가 아닌 실행 전용 사용자 생성
+# /app/data 는 SQLite DB 가 들어갈 볼륨 자리 — 빈 볼륨은 이 폴더의 소유자(appuser)를 물려받는다
 RUN useradd --create-home --uid 10001 appuser \
- && mkdir /app && chown appuser:appuser /app
+ && mkdir -p /app/data && chown -R appuser:appuser /app
 
 # 작업 디렉토리 설정
 WORKDIR /app
@@ -18,7 +20,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# 소스 복사 (앱이 todo.json을 수정할 수 있도록 소유자를 appuser로 지정)
+# 소스 복사 (데이터는 이미지가 아니라 /app/data 볼륨에 저장된다 — .dockerignore 참고)
 COPY --chown=appuser:appuser . .
 
 # 이후 명령은 appuser 권한으로 실행

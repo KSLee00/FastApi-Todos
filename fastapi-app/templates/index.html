@@ -103,7 +103,7 @@
             padding: .45rem .6rem; background: var(--surface);
         }
         input[type="date"]:focus, input[type="number"]:focus, select:focus { outline: none; border-color: var(--accent); }
-        form input[type="text"] { flex: 1 1 40%; }   /* 제목·설명이 첫 줄, 마감일·진행도·추가가 둘째 줄 */
+        form input[type="text"] { flex: 1 1 40%; }   /* 제목·설명이 첫 줄, 태그·마감일이 둘째 줄, 반복·진행도·추가가 셋째 줄 */
         form input[type="date"] { flex: 1 1 8rem; min-width: 0; }
         .progress-input {
             flex: 0 0 auto; display: flex; align-items: center; gap: .25rem;
@@ -234,6 +234,65 @@
             border: 1px solid #f7ccd5; border-radius: 10px;
             padding: .6rem .8rem; font-size: .88rem; margin: 0 0 1rem;
         }
+        /* 학습 통계 — 숫자 타일 2개 + 최근 7일 막대 */
+        .stats { display: grid; grid-template-columns: 1fr 1fr 2fr; gap: .5rem; margin-bottom: 1.25rem; }
+        .stat {
+            display: flex; flex-direction: column; gap: .15rem; min-width: 0;
+            background: var(--surface); border: 1px solid var(--line);
+            border-radius: var(--radius); box-shadow: var(--shadow);
+            padding: .6rem .8rem;
+        }
+        .stat-label { font-size: .75rem; color: var(--muted); }
+        .stat-value { font-size: 1.35rem; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+        .bars { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; height: 3.4rem; }
+        .bar-col {
+            position: relative; display: flex; flex-direction: column; align-items: center; gap: .2rem;
+            cursor: default;
+        }
+        .bar-track { flex: 1; width: 100%; max-width: 1.1rem; display: flex; align-items: flex-end; }
+        .bar { width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; }
+        .bar.zero { background: var(--line); border-radius: 1px; }
+        .bar-label { font-size: .68rem; line-height: 1; color: var(--muted); }
+        .bar-col.today .bar-label { color: var(--text); font-weight: 700; }
+        .bar-col:hover .bar:not(.zero) { background: #4338ca; }
+        .bar-col:hover::after {
+            content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%;
+            transform: translateX(-50%); white-space: nowrap; pointer-events: none; z-index: 2;
+            background: var(--text); color: #fff; font-size: .72rem; padding: .2rem .45rem; border-radius: 6px;
+        }
+        .bar-col:first-child::after { left: 0; transform: none; }
+        .bar-col:nth-child(n+6)::after { left: auto; right: 0; transform: none; }
+        @media (max-width: 480px) {
+            .stats { grid-template-columns: 1fr 1fr; }
+            .stat.chart { grid-column: 1 / -1; }
+        }
+
+        /* 검색 · 태그 */
+        .search-row { margin-bottom: .75rem; }
+        input[type="search"] {
+            width: 100%; font: inherit; font-size: .9rem; color: inherit;
+            border: 1px solid var(--line); border-radius: 10px; padding: .55rem .75rem;
+            background: var(--surface); box-shadow: var(--shadow);
+        }
+        input[type="search"]:focus { outline: none; border-color: var(--accent); }
+        input[type="search"]::placeholder { color: var(--muted); }
+        .tag-filter { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; margin: -.6rem 0 1.25rem; }
+        .tag-filter[hidden] { display: none; }
+        .tag-filter-label { font-size: .78rem; color: var(--muted); margin-right: .2rem; }
+        .tags { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .35rem; }
+        .tag {
+            font-size: .72rem; font-weight: 600; line-height: 1.4;
+            padding: .05rem .5rem; border-radius: 99px;
+            color: #4b4f63; background: var(--bg); border: 1px solid var(--line);
+        }
+        .tag:hover { color: var(--accent); border-color: #c7cbff; }
+        .tag.on { color: #fff; background: var(--accent); border-color: var(--accent); }
+        .rep { color: #4b4f63; background: var(--bg); border-color: var(--line); }
+        .edit-tags { font-size: .82rem; margin-top: .35rem; }
+        .sr-only {
+            position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+            overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+        }
     </style>
 </head>
 <body>
@@ -250,6 +309,26 @@
         <div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div>
     </div>
 
+    <section class="stats" aria-label="학습 통계">
+        <div class="stat" title="오늘(또는 어제)까지 하루도 빠짐없이 할 일을 완료한 날 수">
+            <span class="stat-label">연속 학습</span>
+            <span class="stat-value" id="stat-streak">0일</span>
+        </div>
+        <div class="stat">
+            <span class="stat-label">최근 7일 완료</span>
+            <span class="stat-value" id="stat-recent">0개</span>
+        </div>
+        <div class="stat chart">
+            <span class="stat-label">날짜별 완료</span>
+            <div class="bars" id="stat-bars" aria-hidden="true"></div>
+            <p class="sr-only" id="stat-summary">최근 7일 완료 기록</p>
+        </div>
+    </section>
+
+    <div class="search-row">
+        <input type="search" id="search" placeholder="검색 (제목 · 설명 · 하위 작업 · 태그)" aria-label="검색">
+    </div>
+
     <div class="toolbar">
         <div class="filters" id="filters">
             <button type="button" class="on" data-filter="all">전체</button>
@@ -264,11 +343,23 @@
             </select>
         </label>
     </div>
+    <div class="tag-filter" id="tag-filter" hidden></div>
 
     <form id="todo-form">
+        <label class="sr-only" for="title">제목</label>
         <input type="text" id="title" placeholder="제목 (예: 코딩테스트 LV2)" maxlength="100" required>
+        <label class="sr-only" for="description">설명</label>
         <input type="text" id="description" placeholder="설명 (예: 프로그래머스 3문제)" maxlength="500">
+        <label class="sr-only" for="tags">태그</label>
+        <input type="text" id="tags" placeholder="태그 (예: LV2, 백준)" title="쉼표로 구분해서 최대 5개">
+        <label class="sr-only" for="due-date">마감일</label>
         <input type="date" id="due-date" title="마감일 (선택)">
+        <label class="sr-only" for="repeat">반복</label>
+        <select id="repeat" title="반복">
+            <option value="none" selected>반복 안 함</option>
+            <option value="daily">매일 반복</option>
+            <option value="weekly">매주 반복</option>
+        </select>
         <label class="progress-input" title="진행도 (0~100%)">
             <input type="number" id="progress" min="0" max="100" step="1" value="0" required>%
         </label>
@@ -285,12 +376,37 @@
         let filter = "all";        // all | active | done
         let editingId = null;      // 인라인 편집 중인 항목의 id
         let sortBy = "created";    // created | due | progress
-        let subFocusId = null;     // 하위 작업을 방금 추가한 할 일 — 다시 그린 뒤 입력창에 커서를 돌려준다
+        let query = "";            // 검색어 (제목·설명·하위 작업·태그)
+        let activeTag = "";        // 태그 필터 — 빈 문자열이면 전체
 
         const MAX_SUBTASKS = 20;   // main.py 의 MAX_SUBTASKS 와 같게
+        const MAX_TAGS = 5;        // main.py 의 MAX_TAGS 와 같게
+        const MAX_TAG_LENGTH = 20;
+        const REPEAT = { none: "반복 안 함", daily: "매일 반복", weekly: "매주 반복" };
+        const WEEKDAYS = ["일", "월", "화", "수", "목", "금", "토"];
 
         // 입력값을 0~100 정수로 맞춘다 — 빈칸이면 0
         const clampProgress = (value) => Math.min(100, Math.max(0, Math.round(Number(value) || 0)));
+
+        // 태그는 대소문자를 구분하지 않는다 (서버와 같은 규칙)
+        const sameTag = (a, b) => a.toLowerCase() === b.toLowerCase();
+
+        // "LV2, 프로그래머스" → ["LV2", "프로그래머스"] — 공백·대소문자만 다른 중복은 뺀다
+        function parseTags(text) {
+          const unique = new Map();
+          for (const raw of text.split(/[,，]/)) {
+            const tag = raw.trim();
+            if (tag && !unique.has(tag.toLowerCase())) unique.set(tag.toLowerCase(), tag);
+          }
+          return [...unique.values()];
+        }
+
+        // 서버가 422 로 거부하기 전에 이유를 알려 준다 — 문제가 없으면 null
+        function tagError(tags) {
+          if (tags.length > MAX_TAGS) return `태그는 ${MAX_TAGS}개까지 붙일 수 있어요.`;
+          if (tags.some((t) => t.length > MAX_TAG_LENGTH)) return `태그는 ${MAX_TAG_LENGTH}자까지 쓸 수 있어요.`;
+          return null;
+        }
 
         // 오늘 날짜를 로컬 기준 "YYYY-MM-DD" 로 — toISOString 은 UTC 라 자정 근처에 하루 밀린다
         function today() {
@@ -302,12 +418,21 @@
         const daysLeft = (due) => Math.round((Date.parse(due) - Date.parse(today())) / 86400000);
         const isOverdue = (todo) => !todo.completed && todo.due_date && todo.due_date < today();
 
+        function dueText(n) {
+          if (n === 0) return "오늘 마감";
+          return n > 0 ? `D-${n}` : `${-n}일 지남`;
+        }
+
+        function dueState(todo, n) {
+          if (todo.completed) return "";
+          if (n < 0) return " overdue";
+          return n === 0 ? " today" : "";
+        }
+
         function dueBadge(todo) {
           const n = daysLeft(todo.due_date);
           const [, m, d] = todo.due_date.split("-").map(Number);
-          const when = n === 0 ? "오늘 마감" : n > 0 ? `D-${n}` : `${-n}일 지남`;
-          const state = todo.completed ? "" : n < 0 ? " overdue" : n === 0 ? " today" : "";
-          return el("span", `badge due${state}`, `${m}/${d} · ${when}`);
+          return el("span", `badge due${dueState(todo, n)}`, `${m}/${d} · ${dueText(n)}`);
         }
 
         // 모든 요청을 한 곳에서 처리하고, 실패는 조용히 넘기지 않는다
@@ -334,8 +459,28 @@
           errorEl.hidden = false;
         }
 
-        const load = () => run("목록 불러오기", async () => { todos = await api("/todos"); render(); });
-        const save = (id, todo) => run("수정", async () => { await api(`/todos/${id}`, "PUT", todo); await load(); });
+        const load = () => run("목록 불러오기", async () => {
+          todos = await api("/todos");
+          render();
+          renderStats(await api("/stats"));
+        });
+
+        // 저장 요청은 보낸 순서대로 하나씩 보내고, 화면은 응답을 기다리지 않고 먼저 바꾼다.
+        // 응답 전에 다른 체크를 눌러도 방금 바꾼 상태 위에서 다음 요청을 만들므로 앞의 변경이 사라지지 않는다.
+        let pendingSaves = 0;
+        let saveQueue = Promise.resolve();
+
+        function save(id, todo) {
+          const index = todos.findIndex((t) => t.id === id);
+          if (index !== -1) todos[index] = { ...todos[index], ...todo };
+          render();
+          pendingSaves += 1;
+          saveQueue = saveQueue.then(async () => {
+            await run("수정", () => api(`/todos/${id}`, "PUT", todo));
+            pendingSaves -= 1;
+            if (pendingSaves === 0) await load();   // 마지막 저장이 끝나면 서버 값(진행도·완료일)으로 맞춘다
+          });
+        }
 
         function el(tag, className, textContent) {
           return Object.assign(document.createElement(tag), { className, textContent });
@@ -345,6 +490,12 @@
           return Object.assign(el("button", className, label), { type: "button", onclick });
         }
 
+        function setTag(tag) {
+          activeTag = tag;
+          editingId = null;
+          render();
+        }
+
         // 완료 개수를 세어 상단 막대에 반영한다 — 필터와 무관하게 항상 전체 기준
         function renderProgress() {
           const done = todos.filter((todo) => todo.completed).length;
@@ -352,6 +503,51 @@
           $("progress-label").textContent = `전체 ${todos.length}개 · 완료 ${done}개`;
           $("progress-pct").textContent = `${percent}%`;
           $("progress-bar").style.width = `${percent}%`;
+        }
+
+        // 학습 통계 — 연속 학습일, 최근 7일 완료 개수, 날짜별 막대
+        function renderStats(stats) {
+          $("stat-streak").textContent = `${stats.streak}일`;
+          $("stat-recent").textContent = `${stats.recent_total}개`;
+          const max = Math.max(1, ...stats.recent.map((day) => day.count));
+          const summary = [];
+          const columns = stats.recent.map((day) => {
+            const [y, m, d] = day.date.split("-").map(Number);
+            const weekday = WEEKDAYS[new Date(y, m - 1, d).getDay()];
+            const tip = `${m}/${d}(${weekday}) · ${day.count}개 완료`;
+            summary.push(tip);
+
+            const bar = el("div", day.count ? "bar" : "bar zero");
+            bar.style.height = day.count ? `${(day.count / max) * 100}%` : "2px";   // 0개는 바닥선만
+            const track = el("div", "bar-track");
+            track.append(bar);
+
+            const column = el("div", day.date === stats.today ? "bar-col today" : "bar-col");
+            column.dataset.tip = tip;
+            column.append(track, el("span", "bar-label", weekday));
+            return column;
+          });
+          $("stat-bars").replaceChildren(...columns);
+          $("stat-summary").textContent = `최근 7일 완료: ${summary.join(", ")}`;   // 스크린 리더용
+        }
+
+        // 지금 목록에 있는 태그를 모아 필터 칩으로 보여 준다
+        function renderTagFilter() {
+          const unique = new Map();
+          for (const tag of todos.flatMap((todo) => todo.tags)) {
+            if (!unique.has(tag.toLowerCase())) unique.set(tag.toLowerCase(), tag);
+          }
+          const tags = [...unique.values()].sort((a, b) => a.localeCompare(b, "ko"));
+          if (activeTag && !tags.some((t) => sameTag(t, activeTag))) activeTag = "";   // 마지막 항목을 지운 태그
+
+          const box = $("tag-filter");
+          box.hidden = tags.length === 0;
+          box.replaceChildren(el("span", "tag-filter-label", "태그"), ...tags.map((tag) => {
+            const on = activeTag !== "" && sameTag(tag, activeTag);
+            const chip = button(`#${tag}`, on ? "tag on" : "tag", () => setTag(on ? "" : tag));
+            chip.setAttribute("aria-pressed", String(on));
+            return chip;
+          }));
         }
 
         // 마감일 없는 항목은 마감일순에서 맨 뒤로 보낸다
@@ -364,19 +560,33 @@
           progress: [byProgress, byDue, byId],
         };
 
+        // 검색어·태그 조건 (서버의 GET /todos?q=&tag= 와 같은 규칙)
+        function matches(todo) {
+          if (activeTag && !todo.tags.some((t) => sameTag(t, activeTag))) return false;
+          if (!query) return true;
+          const text = [todo.title, todo.description, ...todo.tags, ...todo.subtasks.map((s) => s.title)].join(" ");
+          return text.toLowerCase().includes(query.toLowerCase());
+        }
+
         function visible() {
-          let rows = todos;
-          if (filter === "active") rows = todos.filter((todo) => !todo.completed);
-          if (filter === "done") rows = todos.filter((todo) => todo.completed);
+          let rows = todos.filter(matches);
+          if (filter === "active") rows = rows.filter((todo) => !todo.completed);
+          if (filter === "done") rows = rows.filter((todo) => todo.completed);
           const compare = SORTERS[sortBy];
           return [...rows].sort((a, b) => compare.reduce((r, fn) => r || fn(a, b), 0));
         }
 
-        // 평소 모습 — 체크박스 + 제목/설명 + 수정/삭제
+        function rowClass(todo) {
+          if (todo.completed) return "done";
+          return isOverdue(todo) ? "overdue" : "";
+        }
+
+        // 평소 모습 — 체크박스 + 제목/설명/배지/태그/하위 작업 + 수정/삭제
         function viewRow(todo) {
           const check = Object.assign(document.createElement("input"), {
             type: "checkbox",
             checked: todo.completed,
+            title: todo.repeat === "none" ? "완료" : `완료 (${REPEAT[todo.repeat]} — 다음 주기에 다시 미완료로)`,
             // 완료로 체크하면 진행도를 100%로, 하위 작업도 모두 체크한다
             onchange: () => save(todo.id, {
               ...todo, completed: check.checked, progress: check.checked ? 100 : todo.progress,
@@ -390,8 +600,17 @@
 
           const meta = el("div", "meta");
           meta.append(progressBadge(todo));
+          if (todo.repeat !== "none") meta.append(el("span", "badge rep", `↻ ${REPEAT[todo.repeat]}`));
           if (todo.due_date) meta.append(dueBadge(todo));
-          body.append(meta, subtaskList(todo));
+          body.append(meta);
+
+          if (todo.tags.length) {
+            const tags = el("div", "tags");
+            tags.append(...todo.tags.map((tag) => Object.assign(
+              button(`#${tag}`, "tag", () => setTag(tag)), { title: `'${tag}' 태그만 보기` })));
+            body.append(tags);
+          }
+          body.append(subtaskList(todo));
 
           const actions = el("div", "actions");
           actions.append(
@@ -399,7 +618,7 @@
             button("삭제", "delete", () => remove(todo.id)),
           );
 
-          const li = el("li", todo.completed ? "done" : isOverdue(todo) ? "overdue" : "");
+          const li = el("li", rowClass(todo));
           li.append(check, body, actions);
           return li;
         }
@@ -417,11 +636,13 @@
           return badge;
         }
 
-        // 하위 작업을 바꿔 저장한다 — 진행도는 서버가 다시 계산한다.
+        // 하위 작업을 바꿔 저장한다 — 진행도는 서버가 다시 계산하지만, 화면에는 미리 같은 값으로 보여 준다.
         // 모두 체크되면 할 일도 완료로, 하나라도 풀리면 미완료로 맞춘다.
         function saveSubtasks(todo, subtasks) {
-          const completed = subtasks.length ? subtasks.every((s) => s.done) : todo.completed;
-          save(todo.id, { ...todo, subtasks, completed });
+          const done = subtasks.filter((s) => s.done).length;
+          const completed = subtasks.length ? done === subtasks.length : todo.completed;
+          const progress = subtasks.length ? Math.round((done / subtasks.length) * 100) : todo.progress;
+          save(todo.id, { ...todo, subtasks, completed, progress });
         }
 
         // 하위 작업 체크리스트 + 추가 입력창
@@ -457,7 +678,6 @@
               if (event.key !== "Enter" || event.isComposing) return;   // 한글 조합 중 Enter 는 무시
               const title = input.value.trim();
               if (!title) return;
-              subFocusId = todo.id;
               // 새 단계가 생기면 아직 안 끝난 것이므로 할 일은 미완료가 된다
               saveSubtasks(todo, [...todo.subtasks, { title, done: false }]);
             };
@@ -466,7 +686,14 @@
           return wrap;
         }
 
-        // 편집 모습 — 제목/설명/마감일/진행도가 입력창으로 바뀌고 저장/취소가 붙는다
+        function repeatPicker(value) {
+          const select = document.createElement("select");
+          select.title = "반복";
+          for (const [key, label] of Object.entries(REPEAT)) select.append(new Option(label, key, false, key === value));
+          return select;
+        }
+
+        // 편집 모습 — 제목/설명/태그/마감일/반복/진행도가 입력창으로 바뀌고 저장/취소가 붙는다
         function editRow(todo) {
           const titleInput = Object.assign(document.createElement("input"), {
             type: "text", className: "edit-input edit-title", value: todo.title, maxLength: 100,
@@ -475,9 +702,14 @@
             type: "text", className: "edit-input edit-desc", value: todo.description,
             maxLength: 500, placeholder: "설명",
           });
+          const tagsInput = Object.assign(document.createElement("input"), {
+            type: "text", className: "edit-input edit-tags", value: todo.tags.join(", "),
+            placeholder: "태그 (쉼표로 구분)",
+          });
           const dueInput = Object.assign(document.createElement("input"), {
             type: "date", value: todo.due_date || "", title: "마감일",
           });
+          const repeatSelect = repeatPicker(todo.repeat);
           const progressInput = Object.assign(document.createElement("input"), {
             type: "number", min: 0, max: 100, step: 1, value: todo.progress, title: "진행도 (0~100%)",
           });
@@ -496,25 +728,35 @@
               titleInput.focus();
               return;
             }
+            const tags = parseTags(tagsInput.value);
+            const problem = tagError(tags);
+            if (problem) {
+              fail(problem);
+              tagsInput.focus();
+              return;
+            }
             editingId = null;
             save(todo.id, {
-              ...todo, title, description: descInput.value.trim(),
-              due_date: dueInput.value || null, progress: clampProgress(progressInput.value),
+              ...todo, title, description: descInput.value.trim(), tags,
+              due_date: dueInput.value || null, repeat: repeatSelect.value,
+              progress: clampProgress(progressInput.value),
             });
           };
           const cancel = () => { editingId = null; errorEl.hidden = true; render(); };
 
           // Enter 로 저장, Esc 로 취소
-          titleInput.onkeydown = descInput.onkeydown = progressInput.onkeydown = (event) => {
-            if (event.key === "Enter") commit();
-            if (event.key === "Escape") cancel();
-          };
+          for (const input of [titleInput, descInput, tagsInput, progressInput]) {
+            input.onkeydown = (event) => {
+              if (event.key === "Enter" && !event.isComposing) commit();
+              if (event.key === "Escape") cancel();
+            };
+          }
 
           const editMeta = el("div", "edit-meta");
-          editMeta.append(dueInput, progressLabel);
+          editMeta.append(dueInput, repeatSelect, progressLabel);
 
           const body = el("div", "body");
-          body.append(titleInput, descInput, editMeta);
+          body.append(titleInput, descInput, tagsInput, editMeta);
 
           const actions = el("div", "actions");
           actions.append(button("저장", "save", commit), button("취소", "cancel", cancel));
@@ -524,20 +766,28 @@
           return li;
         }
 
+        function emptyMessage() {
+          if (query || activeTag) return "조건에 맞는 할 일이 없습니다.";
+          const messages = { all: "할 일이 없습니다. 위에서 추가해 보세요.", active: "미완료 항목이 없습니다.", done: "완료한 항목이 없습니다." };
+          return messages[filter];
+        }
+
         function render() {
+          // 하위 작업을 연달아 적는 중이면, 다시 그린 뒤에도 그 입력창에 커서를 돌려준다
+          const focused = document.activeElement;
+          const typingSubFor = focused?.classList.contains("sub-add") ? focused.dataset.todoId : null;
+
+          renderTagFilter();
           const rows = visible();
           if (rows.length) {
             listEl.replaceChildren(...rows.map((todo) => todo.id === editingId ? editRow(todo) : viewRow(todo)));
           } else {
-            const messages = { all: "할 일이 없습니다. 위에서 추가해 보세요.", active: "미완료 항목이 없습니다.", done: "완료한 항목이 없습니다." };
-            listEl.replaceChildren(el("li", "empty", messages[filter]));
+            listEl.replaceChildren(el("li", "empty", emptyMessage()));
           }
           renderProgress();
-          listEl.querySelector(".edit-title")?.focus();   // 편집 시작 시 제목에 커서
-          if (subFocusId !== null) {                      // 하위 작업을 연달아 적을 수 있게
-            listEl.querySelector(`.sub-add[data-todo-id="${subFocusId}"]`)?.focus();
-            subFocusId = null;
-          }
+
+          if (editingId !== null) listEl.querySelector(".edit-title")?.focus();   // 편집 시작 시 제목에 커서
+          if (typingSubFor) listEl.querySelector(`.sub-add[data-todo-id="${typingSubFor}"]`)?.focus();
         }
 
         function remove(id) {
@@ -555,6 +805,7 @@
         };
 
         $("sort").onchange = (event) => { sortBy = event.target.value; render(); };
+        $("search").oninput = (event) => { query = event.target.value.trim(); render(); };
 
         $("todo-form").onsubmit = (event) => {
           event.preventDefault();
@@ -563,10 +814,17 @@
             fail("제목을 입력해 주세요.");
             return;
           }
+          const tags = parseTags($("tags").value);
+          const problem = tagError(tags);
+          if (problem) {
+            fail(problem);
+            return;
+          }
           run("추가", async () => {
             await api("/todos", "POST", {
-              title, description: $("description").value.trim(),
-              due_date: $("due-date").value || null, progress: clampProgress($("progress").value),
+              title, description: $("description").value.trim(), tags,
+              due_date: $("due-date").value || null, repeat: $("repeat").value,
+              progress: clampProgress($("progress").value),
             });
             event.target.reset();
             await load();

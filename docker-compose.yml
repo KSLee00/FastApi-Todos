@@ -7,6 +7,10 @@ services:
     ports:
       - "8032:8000"
     restart: unless-stopped       # 서버 재부팅·오류 시 자동 재시작
+    environment:
+      - APP_TZ=Asia/Seoul         # 반복 할 일·통계의 "오늘" 기준 (UTC 를 쓰면 오전 9시에 날짜가 바뀜)
+    volumes:
+      - todo_data:/app/data       # SQLite DB — 컨테이너를 새로 만들어도(다시 배포해도) 데이터가 남는다
     security_opt:
       - no-new-privileges:true    # 컨테이너 안에서 권한 상승 차단
     cap_drop:
@@ -19,15 +23,16 @@ services:
       - "9000:9000"
     environment:
       - SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true
-    volumes:                                    # ← 추가: 볼륨을 컨테이너 경로에 마운트
+    volumes:
       - sonarqube_data:/opt/sonarqube/data
       - sonarqube_extensions:/opt/sonarqube/extensions
       - sonarqube_logs:/opt/sonarqube/logs
       - sonarqube_temp:/opt/sonarqube/temp
-    tmpfs:                                      # ← 추가: /tmp를 쓰기 가능하게
+    tmpfs:                                      # /tmp 만 쓰기 가능하게
       - /tmp
 
-volumes:                                        # ← 최상위(0칸)로 이동
+volumes:
+  todo_data:                                    # 앱 데이터 (SQLite)
   sonarqube_data:
   sonarqube_extensions:
   sonarqube_logs:

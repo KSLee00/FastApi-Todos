@@ -5,3 +5,4 @@ pytest>=9.0.3             # CVE-2025-71176(임시 디렉터리) 패치 버전
 pytest-cov>=7.1.0
 pytest-html>=4.2.0
 httpx2>=2.13.1            # FastAPI TestClient용 HTTP 클라이언트 (httpx는 deprecated)
+tzdata>=2025.2            # Asia/Seoul 시간대 데이터 (slim 이미지·Windows 에는 없을 수 있음)
