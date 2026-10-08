@@ -11,3 +11,24 @@ services:
       - no-new-privileges:true    # 컨테이너 안에서 권한 상승 차단
     cap_drop:
       - ALL                       # 불필요한 커널 권한 모두 제거
+  sonarqube:
+    image: sonarqube:26.9.0.129388-community
+    container_name: sonarqube
+    read_only: true                             # 컨테이너 파일시스템 읽기 전용 (아래 볼륨과 /tmp만 쓰기 가능)
+    ports:
+      - "9000:9000"
+    environment:
+      - SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true
+    volumes:                                    # ← 추가: 볼륨을 컨테이너 경로에 마운트
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+      - sonarqube_temp:/opt/sonarqube/temp
+    tmpfs:                                      # ← 추가: /tmp를 쓰기 가능하게
+      - /tmp
+
+volumes:                                        # ← 최상위(0칸)로 이동
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_logs:
+  sonarqube_temp:
