@@ -20,8 +20,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# 소스 복사 (데이터는 이미지가 아니라 /app/data 볼륨에 저장된다 — .dockerignore 참고)
-COPY --chown=appuser:appuser . .
+# 실행에 필요한 파일만 복사한다 — 테스트·캐시·가상환경·DB 가 이미지에 들어가지 않는다
+# (폴더 전체를 복사하는 COPY . . 는 SonarQube 가 보안 핫스팟으로 지적한다)
+# 실제 데이터는 이미지가 아니라 /app/data 볼륨에 저장된다
+COPY --chown=appuser:appuser main.py todo.json ./
+COPY --chown=appuser:appuser templates ./templates
 
 # 이후 명령은 appuser 권한으로 실행
 USER appuser

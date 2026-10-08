@@ -1,5 +1,6 @@
 # 배포된 서버에 실제 HTTP 요청을 보내 API를 확인하는 통합 테스트
-# 실행: BASE_URL=http://[팀 서버 IP]:[port num] EXPECTED_VERSION=5.0.0 pytest integration_tests
+# 실행: BASE_URL=http://[서버 IP]:[port num] EXPECTED_VERSION=5.0.0 pytest fastapi-app/tests/test_deployed_api.py
+# BASE_URL 이 없으면 이 파일은 통째로 건너뛴다 → pytest fastapi-app/tests 는 단위 테스트만 실행된다
 #
 # v1 ~ v5 가 동시에 떠 있어도 이 파일 하나로 모두 검사한다.
 # 먼저 서버 버전을 알아낸 뒤, 그 버전에 없는 기능의 테스트는 skip 한다.
@@ -15,7 +16,9 @@ import httpx2
 import pytest
 
 
-BASE_URL = os.environ.get("BASE_URL", "http://163.239.77.76:8034").rstrip("/")
+BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")
+if not BASE_URL:
+    pytest.skip("BASE_URL 이 없어 통합 테스트를 건너뜀 (배포 주소를 주면 실행된다)", allow_module_level=True)
 # 이 주소에 떠 있어야 하는 버전 (예: 3.0.0). 비워 두면 버전 일치 검사는 건너뛴다.
 EXPECTED_VERSION = os.environ.get("EXPECTED_VERSION", "")
 
@@ -54,16 +57,20 @@ def server_version(client):
     return response.json()["version"]
 
 
+def since(version):
+    # 테스트 함수에 "이 버전부터 있는 기능" 표시만 붙인다 — 판단은 아래 skip_if_older 가 한다
+    def mark(test):
+        test.since = version
+        return test
+    return mark
+
+
 @pytest.fixture(autouse=True)
 def skip_if_older(request, server_version):
     # @since("4.0.0") 이 붙은 테스트는 그보다 오래된 서버에서 건너뛴다
-    marker = request.node.get_closest_marker("since")
-    if marker and parse(server_version) < parse(marker.args[0]):
-        pytest.skip(f"v{marker.args[0]} 기능 — 이 서버는 v{server_version}")
-
-
-def since(version):
-    return pytest.mark.since(version)          # 마커 등록은 conftest.py
+    required = getattr(request.function, "since", None)
+    if required and parse(server_version) < parse(required):
+        pytest.skip(f"v{required} 기능 — 이 서버는 v{server_version}")
 
 
 @pytest.fixture

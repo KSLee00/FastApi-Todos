@@ -22,7 +22,8 @@ INDEX_FILE = BASE_DIR / "templates" / "index.html"
 # 데이터는 컨테이너 밖(Docker 볼륨)에 두어야 다시 배포해도 남는다 → docker-compose.yml 의 todo_data
 DATA_DIR = Path(os.environ.get("TODO_DATA_DIR", BASE_DIR / "data"))
 DB_FILE = DATA_DIR / "todos.db"
-# v4 까지 쓰던 JSON 파일 — DB 가 비어 있을 때 한 번만 옮겨 담는다 (앞에 있는 것이 우선)
+# 초기 데이터 / v4 까지 쓰던 JSON 파일 — DB 가 비어 있을 때 한 번만 옮겨 담는다 (앞에 있는 것이 우선)
+# fastapi-app/todo.json 은 빈 목록([])으로 레포에 두고, 실제 데이터는 DB 에 쌓인다
 LEGACY_FILES = [DATA_DIR / "todo.json", BASE_DIR / "todo.json"]
 
 # "오늘"의 기준 — 컨테이너 기본 시간대는 UTC 라서 그대로 쓰면 반복·통계가 오전 9시에 바뀐다
@@ -203,6 +204,8 @@ def migrate_legacy_json() -> int:
         todos = [TodoItem(**t) for t in json.loads(source.read_text(encoding=ENCODING))]
         for todo in todos:
             insert(conn, todo, keep_id=True)
+    if not todos:                                # 빈 초기 데이터(레포의 todo.json)는 그대로 둔다 — git 에서 지워진 것처럼 보이지 않게
+        return 0
     try:
         source.rename(source.with_name(source.name + ".migrated"))
     except OSError:                              # 읽기 전용 위치여도 DB 가 차 있으니 다음엔 건너뛴다

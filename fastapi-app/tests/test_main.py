@@ -1,11 +1,16 @@
 import json
+import sys
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-import main
-from main import app, save_todos, load_todos, TodoItem
+# main.py 가 있는 fastapi-app 폴더를 import 경로에 추가 — 어느 폴더에서 pytest 를 실행해도 main 을 찾는다
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import main  # noqa: E402
+from main import app, save_todos, load_todos, TodoItem  # noqa: E402
 
 client = TestClient(app)
 
@@ -217,6 +222,14 @@ def test_migrate_skipped_when_db_has_data():
     write_legacy([{"id": 1, "title": "옛 할 일"}])
     assert main.migrate_legacy_json() == 0       # DB 에 데이터가 있으면 덮어쓰지 않는다
     assert [t["title"] for t in client.get("/todos").json()] == ["이미 있는 할 일"]
+
+
+def test_migrate_empty_seed_file():
+    # 레포에 들어 있는 fastapi-app/todo.json 은 빈 목록 — 서버가 처음 떠도 오류 없이 빈 상태로 시작한다
+    write_legacy([])
+    assert main.migrate_legacy_json() == 0
+    assert client.get("/todos").json() == []
+    assert main.LEGACY_FILES[0].exists()         # 빈 파일은 이름을 바꾸지 않는다 (git 에서 삭제로 보이지 않게)
 
 
 def test_migrate_without_legacy_file():
