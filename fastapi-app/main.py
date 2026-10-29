@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 APP_VERSION = "6.0.0"                            # 화면 배지와 /version 이 함께 쓰는 단일 출처
@@ -444,6 +445,11 @@ app = FastAPI(
     redoc_url="/redoc" if ENABLE_DOCS else None,
     openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
+
+
+# Prometheus 메트릭(/metrics) — 경로별 요청 수·응답 시간을 자동으로 기록한다
+# 로그인 없이 열려 있어야 Prometheus 가 가져갈 수 있다 (실습용. 운영에서는 프록시로 외부 접근을 막는다)
+Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 
 @app.middleware("http")

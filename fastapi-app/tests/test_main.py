@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import sys
+from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -484,7 +485,7 @@ def test_signup_sets_safe_session_cookie():
 
 
 def test_password_is_hashed():
-    with sqlite3.connect(main.DB_FILE) as db:
+    with closing(sqlite3.connect(main.DB_FILE)) as db:   # with 만으로는 연결이 닫히지 않는다
         stored, = db.execute("SELECT password_hash FROM users WHERE username = 'tester'").fetchone()
     assert stored.startswith("scrypt$")
     assert TESTER["password"] not in stored
@@ -579,7 +580,7 @@ def test_delete_account_removes_only_own_data():
     assert bob.delete("/auth/me").status_code == 204
     assert bob.get("/todos").status_code == 401
     assert TestClient(app).post("/auth/login", json={"username": "bob", "password": "password123"}).status_code == 401
-    with sqlite3.connect(main.DB_FILE) as db:
+    with closing(sqlite3.connect(main.DB_FILE)) as db:   # with 만으로는 연결이 닫히지 않는다
         assert db.execute("SELECT COUNT(*) FROM completions WHERE user_id = 2").fetchone()[0] == 0
     assert [t["title"] for t in client.get("/todos").json()] == ["tester 의 할 일"]
 
@@ -592,7 +593,7 @@ def test_legacy_data_not_claimed_without_owner():
     client.post("/auth/login", json=TESTER)
     new_user("first_after_upgrade")
     assert client.get("/todos").json() == []
-    with sqlite3.connect(main.DB_FILE) as db:
+    with closing(sqlite3.connect(main.DB_FILE)) as db:   # with 만으로는 연결이 닫히지 않는다
         assert db.execute("SELECT COUNT(*) FROM todos WHERE user_id IS NULL").fetchone()[0] == 1
 
 
@@ -609,7 +610,7 @@ def test_legacy_data_claimed_only_by_owner():
 def test_upgrade_v5_database(tmp_path, monkeypatch, clock):
     # v5 DB(user_id 열 없음)를 그대로 두고 v6 를 띄워도, 열을 추가하고 LEGACY_OWNER 가 데이터와 통계를 가져간다
     v5_db = tmp_path / "v5.db"
-    with sqlite3.connect(v5_db) as db:
+    with closing(sqlite3.connect(v5_db)) as db:
         db.executescript("""
             CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT '', completed INTEGER NOT NULL DEFAULT 0, due_date TEXT,
@@ -639,3 +640,20 @@ def test_security_headers():
 @pytest.mark.parametrize("url", ["/docs", "/redoc", "/openapi.json"])
 def test_api_docs_disabled_by_default(url):
     assert client.get(url).status_code == 404
+
+
+# ---------- 모니터링 (Prometheus) ----------
+
+def test_metrics_endpoint_without_login():
+    client.get("/todos")                         # 요청을 하나 보내 두면 메트릭에 기록된다
+    response = TestClient(app).get("/metrics")   # Prometheus 는 로그인 없이 가져간다
+    assert response.status_code == 200
+    body = response.text
+    assert "http_requests_total" in body
+    assert 'handler="/todos"' in body
+    assert 'status="2xx"' in body                # 과제 PromQL 의 status="2xx" 와 같은 형태로 묶여 있다
+    assert "http_request_duration_seconds_bucket" in body
+
+
+def test_metrics_hidden_from_api_docs():
+    assert "/metrics" not in [route.path for route in app.routes if getattr(route, "include_in_schema", False)]

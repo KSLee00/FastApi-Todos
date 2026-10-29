@@ -1,0 +1,18 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # FastApi 애플리케이션의 메트릭 수집 (/metrics)
+  - job_name: 'fastapi'
+    static_configs:
+      - targets: ['fastapi-app:8000']   # Docker Compose 내부에서는 서비스명과 컨테이너 내부 포트를 사용
+
+  # 시스템 메트릭 수집 (node-exporter) — CPU · 메모리 · 디스크 · 네트워크
+  - job_name: 'node'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  # 컨테이너별 메트릭 수집 (cAdvisor) — 컨테이너마다 CPU · 메모리 · 네트워크 사용량
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']      # 외부에 포트를 열지 않고 내부 네트워크로만 수집

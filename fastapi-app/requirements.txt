@@ -6,3 +6,5 @@ pytest-cov>=7.1.0
 pytest-html>=4.2.0
 httpx2>=2.13.1            # FastAPI TestClient용 HTTP 클라이언트 (httpx는 deprecated)
 tzdata>=2025.2            # Asia/Seoul 시간대 데이터 (slim 이미지·Windows 에는 없을 수 있음)
+prometheus-fastapi-instrumentator>=8.1.0   # /metrics 엔드포인트 — Starlette 1.x 지원 버전 (7.x 이하는 설치 충돌)
+prometheus-client>=0.26.0

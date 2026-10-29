@@ -417,3 +417,12 @@ def test_security_headers(client):
 def test_api_docs_hidden(client):
     assert client.get("/docs").status_code == 404
     assert client.get("/openapi.json").status_code == 404
+
+
+@since("6.0.0")
+def test_metrics_endpoint():
+    # Prometheus 가 가져가는 /metrics — 로그인 없이 열려 있어야 수집할 수 있다
+    with httpx2.Client(base_url=BASE_URL, timeout=5) as anonymous:
+        response = anonymous.get("/metrics")
+    assert response.status_code == 200
+    assert "http_requests_total" in response.text
