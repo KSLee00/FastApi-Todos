@@ -211,20 +211,20 @@ def write_legacy(rows):
     main.LEGACY_FILES[0].write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
 
 
-def claim_as_tester():
+def claim_as_tester(monkeypatch):
     # tester 를 LEGACY_OWNER 로 지정하고 다시 로그인하면 주인 없는 할 일을 가져간다
-    main.LEGACY_OWNER = "tester"                 # isolated_db 의 monkeypatch 가 테스트 뒤 "" 로 되돌린다
+    monkeypatch.setattr(main, "LEGACY_OWNER", "tester")   # 테스트가 끝나면 자동으로 되돌린다
     assert client.post("/auth/login", json=TESTER).status_code == 200
 
 
-def test_migrate_legacy_json():
+def test_migrate_legacy_json(monkeypatch):
     # v3 의 priority 가 남아 있어도 읽히고, 원래 id 가 그대로 유지된다
     write_legacy([
         {"id": 3, "title": "옛 할 일", "priority": "high"},
         {"id": 7, "title": "코딩테스트", "progress": 40, "subtasks": [{"title": "문제 1", "done": True}]},
     ])
     assert main.migrate_legacy_json() == 2
-    claim_as_tester()
+    claim_as_tester(monkeypatch)
     todos = client.get("/todos").json()
     assert [t["id"] for t in todos] == [3, 7]
     assert todos[0]["progress"] == 0
@@ -254,9 +254,9 @@ def test_migrate_without_legacy_file():
     assert main.migrate_legacy_json() == 0
 
 
-def test_startup_runs_migration():
+def test_startup_runs_migration(monkeypatch):
     write_legacy([{"id": 1, "title": "옛 할 일"}])
-    main.LEGACY_OWNER = "tester"
+    monkeypatch.setattr(main, "LEGACY_OWNER", "tester")
     with TestClient(app) as started:             # with 로 열어야 서버 시작(lifespan)이 실행된다
         assert started.post("/auth/login", json=TESTER).status_code == 200
         assert [t["title"] for t in started.get("/todos").json()] == ["옛 할 일"]
@@ -597,10 +597,10 @@ def test_legacy_data_not_claimed_without_owner():
         assert db.execute("SELECT COUNT(*) FROM todos WHERE user_id IS NULL").fetchone()[0] == 1
 
 
-def test_legacy_data_claimed_only_by_owner():
+def test_legacy_data_claimed_only_by_owner(monkeypatch):
     write_legacy([{"id": 5, "title": "옛 할 일"}])
     main.migrate_legacy_json()
-    main.LEGACY_OWNER = "Owner"                  # 대소문자는 구분하지 않는다
+    monkeypatch.setattr(main, "LEGACY_OWNER", "Owner")    # 대소문자는 구분하지 않는다
     client.post("/auth/login", json=TESTER)
     assert client.get("/todos").json() == []                            # tester 는 주인이 아니다
     owner = new_user("owner")
@@ -622,7 +622,7 @@ def test_upgrade_v5_database(tmp_path, monkeypatch, clock):
             INSERT INTO completions (todo_id, title, completed_on) VALUES (9, 'v5 할 일', '2026-10-07');
         """)
     monkeypatch.setattr(main, "DB_FILE", v5_db)
-    main.LEGACY_OWNER = "owner"
+    monkeypatch.setattr(main, "LEGACY_OWNER", "owner")
     owner = new_user("owner")
     todos = owner.get("/todos").json()
     assert [(t["id"], t["title"]) for t in todos] == [(9, "v5 할 일")]

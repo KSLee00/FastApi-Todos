@@ -46,6 +46,7 @@ MAX_TAGS = 5
 STATS_DAYS = 7                                   # 통계 막대에 보여 줄 최근 일수
 
 SESSION_COOKIE = "todo_session"
+LOGIN_REQUIRED = "로그인이 필요합니다."
 SESSION_DAYS = 7
 MAX_FAILED_LOGINS = 5                            # 연속으로 틀리면
 LOCK_MINUTES = 5                                 # 이만큼 로그인을 막는다
@@ -329,14 +330,14 @@ def claim_legacy(conn: sqlite3.Connection, user: User) -> None:
 
 def current_user(token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> User:
     if not token:
-        raise HTTPException(401, "로그인이 필요합니다.")
+        raise HTTPException(401, LOGIN_REQUIRED)
     with transaction() as conn:
         row = conn.execute(
             """SELECT users.id, users.username FROM sessions JOIN users ON users.id = sessions.user_id
                WHERE sessions.token_hash = ? AND sessions.expires_at > ?""",
             (token_hash(token), utcnow().isoformat())).fetchone()
     if row is None:
-        raise HTTPException(401, "로그인이 필요합니다.")
+        raise HTTPException(401, LOGIN_REQUIRED)
     return User(id=row["id"], username=row["username"])
 
 
@@ -417,7 +418,7 @@ def matches(todo: TodoItem, q: str, tag: str) -> bool:
 # ---------- API ----------
 
 NOT_FOUND = {404: {"description": "To-Do item not found"}}   # API 문서(/docs)에 404 응답을 표시
-UNAUTHORIZED = {401: {"description": "로그인이 필요합니다."}}
+UNAUTHORIZED = {401: {"description": LOGIN_REQUIRED}}
 AUTH_REQUIRED = {**UNAUTHORIZED, **NOT_FOUND}
 
 # 브라우저가 지키는 보안 헤더 — 클릭재킹(다른 사이트가 프레임으로 감싸기), MIME 추측, 외부 스크립트를 막는다
@@ -472,7 +473,10 @@ def signup(payload: SignupIn, response: Response) -> User:
     return user
 
 
-@app.post("/auth/login", responses={**UNAUTHORIZED, 429: {"description": "로그인 시도 제한"}})
+@app.post("/auth/login", responses={
+    401: {"description": "아이디 또는 비밀번호가 올바르지 않음"},
+    429: {"description": "로그인 시도 제한"},
+})
 def login(payload: LoginIn, response: Response) -> User:
     # 실패 횟수는 저장해야 하므로 트랜잭션을 끝낸(COMMIT) 뒤에 오류를 돌려준다
     now = utcnow()
