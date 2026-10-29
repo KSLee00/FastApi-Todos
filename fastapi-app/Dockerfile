@@ -35,5 +35,5 @@ USER appuser
 
 EXPOSE 8000
 
-# FastAPI 서버 실행
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# FastAPI 서버 실행 — --no-server-header: 응답에 "server: uvicorn" 을 붙이지 않는다 (서버 종류 노출 방지)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]

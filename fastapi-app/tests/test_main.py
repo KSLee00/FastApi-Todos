@@ -1,6 +1,7 @@
 import json
+import sqlite3
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -12,9 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import main  # noqa: E402
 from main import app, save_todos, load_todos, TodoItem  # noqa: E402
 
-client = TestClient(app)
+client = TestClient(app)                         # 매 테스트 tester 로 로그인된 클라이언트
 
 TODAY = date(2026, 10, 7)                        # 수요일 — 반복·통계 테스트가 날짜에 흔들리지 않게 고정
+TESTER = {"username": "tester", "password": "password123"}
+TESTER_ID = 1                                    # 매 테스트 새 DB 에서 처음 가입하므로 항상 1
 
 
 class Clock:
@@ -32,6 +35,13 @@ def isolated_db(tmp_path, monkeypatch):
     # 테스트가 끝나면 tmp_path 와 monkeypatch 가 자동으로 원상 복구한다
     monkeypatch.setattr(main, "DB_FILE", tmp_path / "todos.db")
     monkeypatch.setattr(main, "LEGACY_FILES", [tmp_path / "todo.json"])
+    monkeypatch.setattr(main, "SCRYPT_N", 2 ** 8)   # 비밀번호 해시를 가볍게 — 테스트 속도용 (운영은 2**15)
+    monkeypatch.setattr(main, "LEGACY_OWNER", "")
+    # v6 부터 모든 할 일 API 는 로그인이 필요하다 — tester 로 가입해 쿠키를 받아 둔다
+    client.cookies.clear()
+    response = client.post("/auth/signup", json=TESTER)
+    assert response.status_code == 201
+    assert response.json()["id"] == TESTER_ID
 
 
 @pytest.fixture
@@ -63,7 +73,7 @@ def test_get_todos_empty():
 
 def test_get_todos_with_items():
     todo = TodoItem(id=1, title="Test", description="Test description", completed=False)
-    save_todos([todo])  # save_todos 는 TodoItem 객체 리스트를 받음
+    save_todos([todo], user_id=TESTER_ID)  # save_todos 는 TodoItem 객체 리스트와 주인 id 를 받음
     response = client.get("/todos")
     assert response.status_code == 200
     assert len(response.json()) == 1
@@ -104,7 +114,7 @@ def test_title_is_trimmed():
 
 def test_update_todo():
     todo = TodoItem(id=1, title="Test", description="Test description", completed=False)
-    save_todos([todo])
+    save_todos([todo], user_id=TESTER_ID)
     updated_todo = {"title": "Updated", "description": "Updated description", "completed": True}
     response = client.put("/todos/1", json=updated_todo)
     assert response.status_code == 200
@@ -120,7 +130,7 @@ def test_update_todo_not_found():
 
 def test_delete_todo():
     todo = TodoItem(id=1, title="Test", description="Test description", completed=False)
-    save_todos([todo])
+    save_todos([todo], user_id=TESTER_ID)
     response = client.delete("/todos/1")
     assert response.status_code == 204           # 삭제 성공 = 204 No Content (응답 본문 없음)
     assert load_todos() == []
@@ -132,7 +142,7 @@ def test_delete_todo_not_found():
 
 
 def test_version():
-    assert client.get("/version").json() == {"version": "5.0.0"}
+    assert client.get("/version").json() == {"version": "6.0.0"}
 
 
 # ---------- 진행도 · 하위 작업 (v4~) ----------
@@ -148,7 +158,7 @@ def test_create_todo_progress_out_of_range(progress):
 
 
 def test_update_todo_progress():
-    save_todos([TodoItem(id=1, title="코딩테스트 LV2")])
+    save_todos([TodoItem(id=1, title="코딩테스트 LV2")], user_id=TESTER_ID)
     response = client.put("/todos/1", json={"title": "코딩테스트 LV2", "progress": 60})
     assert response.status_code == 200
     assert load_todos()[0].progress == 60        # DB 에도 반영됐는지 확인
@@ -200,6 +210,12 @@ def write_legacy(rows):
     main.LEGACY_FILES[0].write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
 
 
+def claim_as_tester():
+    # tester 를 LEGACY_OWNER 로 지정하고 다시 로그인하면 주인 없는 할 일을 가져간다
+    main.LEGACY_OWNER = "tester"                 # isolated_db 의 monkeypatch 가 테스트 뒤 "" 로 되돌린다
+    assert client.post("/auth/login", json=TESTER).status_code == 200
+
+
 def test_migrate_legacy_json():
     # v3 의 priority 가 남아 있어도 읽히고, 원래 id 가 그대로 유지된다
     write_legacy([
@@ -207,6 +223,7 @@ def test_migrate_legacy_json():
         {"id": 7, "title": "코딩테스트", "progress": 40, "subtasks": [{"title": "문제 1", "done": True}]},
     ])
     assert main.migrate_legacy_json() == 2
+    claim_as_tester()
     todos = client.get("/todos").json()
     assert [t["id"] for t in todos] == [3, 7]
     assert todos[0]["progress"] == 0
@@ -238,7 +255,9 @@ def test_migrate_without_legacy_file():
 
 def test_startup_runs_migration():
     write_legacy([{"id": 1, "title": "옛 할 일"}])
+    main.LEGACY_OWNER = "tester"
     with TestClient(app) as started:             # with 로 열어야 서버 시작(lifespan)이 실행된다
+        assert started.post("/auth/login", json=TESTER).status_code == 200
         assert [t["title"] for t in started.get("/todos").json()] == ["옛 할 일"]
 
 
@@ -412,3 +431,211 @@ def test_recent_window_drops_old_days(clock):
     s = stats()
     assert s["recent_total"] == 0
     assert s["total"] == 1
+
+
+# ---------- 계정 · 로그인 (v6~) ----------
+
+class UtcClock:
+    # main.utcnow() 를 바꿔 끼워 세션 만료·로그인 잠금 시간을 흉내 낸다
+    def __init__(self):
+        self.now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+
+    def advance(self, **delta):
+        self.now += timedelta(**delta)
+
+
+@pytest.fixture
+def utc(monkeypatch):
+    c = UtcClock()
+    monkeypatch.setattr(main, "utcnow", lambda: c.now)
+    return c
+
+
+def new_user(username, password="password123"):
+    # 쿠키를 따로 갖는 새 브라우저처럼 동작하는 클라이언트
+    other = TestClient(app)
+    assert other.post("/auth/signup", json={"username": username, "password": password}).status_code == 201
+    return other
+
+
+@pytest.mark.parametrize("method, url", [
+    ("get", "/todos"), ("post", "/todos"), ("put", "/todos/1"), ("delete", "/todos/1"),
+    ("get", "/stats"), ("get", "/auth/me"), ("delete", "/auth/me"),
+])
+def test_requires_login(method, url):
+    anonymous = TestClient(app)
+    response = getattr(anonymous, method)(url, **({"json": {"title": "x"}} if method in ("post", "put") else {}))
+    assert response.status_code == 401
+
+
+def test_public_pages_without_login():
+    anonymous = TestClient(app)
+    assert anonymous.get("/").status_code == 200                # 로그인 화면도 같은 페이지
+    assert anonymous.get("/version").status_code == 200
+
+
+def test_signup_sets_safe_session_cookie():
+    response = TestClient(app).post("/auth/signup", json={"username": "alice", "password": "password123"})
+    assert response.status_code == 201
+    assert response.json() == {"id": 2, "username": "alice"}    # 비밀번호는 응답에 없다
+    cookie = response.headers["set-cookie"].lower()
+    assert "httponly" in cookie                                 # 스크립트가 읽지 못한다
+    assert "samesite=strict" in cookie                          # 다른 사이트 요청에 붙지 않는다
+
+
+def test_password_is_hashed():
+    with sqlite3.connect(main.DB_FILE) as db:
+        stored, = db.execute("SELECT password_hash FROM users WHERE username = 'tester'").fetchone()
+    assert stored.startswith("scrypt$")
+    assert TESTER["password"] not in stored
+
+
+def test_duplicate_username_is_case_insensitive():
+    response = TestClient(app).post("/auth/signup", json={"username": "TESTER", "password": "password123"})
+    assert response.status_code == 409
+
+
+@pytest.mark.parametrize("username, password", [
+    ("ab", "password123"),                       # 아이디 3자 미만
+    ("bad name!", "password123"),                # 영문·숫자·_ 외의 문자
+    ("alice", "short"),                          # 비밀번호 8자 미만
+])
+def test_signup_validation(username, password):
+    response = TestClient(app).post("/auth/signup", json={"username": username, "password": password})
+    assert response.status_code == 422
+
+
+def test_login_and_me():
+    other = TestClient(app)
+    assert other.post("/auth/login", json=TESTER).json() == {"id": TESTER_ID, "username": "tester"}
+    assert other.get("/auth/me").json()["username"] == "tester"
+
+
+@pytest.mark.parametrize("credentials", [
+    {"username": "tester", "password": "wrong-password"},
+    {"username": "nobody", "password": "password123"},
+])
+def test_login_failure_gives_same_message(credentials):
+    # 틀린 비밀번호와 없는 아이디를 같은 응답으로 — 어떤 아이디가 있는지 알려 주지 않는다
+    response = TestClient(app).post("/auth/login", json=credentials)
+    assert response.status_code == 401
+    assert response.json()["detail"] == "아이디 또는 비밀번호가 올바르지 않습니다."
+
+
+def test_login_lockout_after_failures(utc):
+    other = TestClient(app)
+    wrong = {"username": "tester", "password": "wrong-password"}
+    for _ in range(main.MAX_FAILED_LOGINS):
+        assert other.post("/auth/login", json=wrong).status_code == 401
+    assert other.post("/auth/login", json=TESTER).status_code == 429     # 맞는 비밀번호도 잠시 막힌다
+    utc.advance(minutes=main.LOCK_MINUTES, seconds=1)
+    assert other.post("/auth/login", json=TESTER).status_code == 200     # 시간이 지나면 풀린다
+
+
+def test_successful_login_resets_failures(utc):
+    other = TestClient(app)
+    wrong = {"username": "tester", "password": "wrong-password"}
+    for _ in range(main.MAX_FAILED_LOGINS - 1):
+        other.post("/auth/login", json=wrong)
+    assert other.post("/auth/login", json=TESTER).status_code == 200
+    assert other.post("/auth/login", json=wrong).status_code == 401       # 다시 1번째 실패 — 잠기지 않는다
+
+
+def test_logout_invalidates_session():
+    token = client.cookies.get(main.SESSION_COOKIE)
+    assert client.post("/auth/logout").status_code == 204
+    assert client.get("/todos").status_code == 401
+    stolen = TestClient(app, cookies={main.SESSION_COOKIE: token})       # 로그아웃한 토큰은 다시 쓸 수 없다
+    assert stolen.get("/todos").status_code == 401
+
+
+def test_session_expires(utc):
+    other = TestClient(app)
+    other.post("/auth/login", json=TESTER)
+    utc.advance(days=main.SESSION_DAYS, seconds=1)
+    assert other.get("/todos").status_code == 401
+
+
+def test_forged_cookie_rejected():
+    forged = TestClient(app, cookies={main.SESSION_COOKIE: "made-up-token"})
+    assert forged.get("/todos").status_code == 401
+
+
+def test_users_cannot_touch_each_others_todos():
+    mine = update(create(title="tester 의 할 일"), completed=True)
+    bob = new_user("bob")
+    assert bob.get("/todos").json() == []                               # 남의 할 일은 목록에 없다
+    assert bob.get("/todos", params={"q": "tester"}).json() == []        # 검색으로도 안 보인다
+    assert bob.put(f"/todos/{mine['id']}", json={"title": "가로채기"}).status_code == 404
+    assert bob.delete(f"/todos/{mine['id']}").status_code == 404        # 있는지조차 알려 주지 않는다
+    assert bob.get("/stats").json()["total"] == 0                       # 통계도 사람별
+    assert client.get("/todos").json()[0]["title"] == "tester 의 할 일"  # 원래 주인 것은 그대로
+
+
+def test_delete_account_removes_only_own_data():
+    create(title="tester 의 할 일")
+    bob = new_user("bob")
+    bob.post("/todos", json={"title": "bob 의 할 일", "completed": True})
+    assert bob.delete("/auth/me").status_code == 204
+    assert bob.get("/todos").status_code == 401
+    assert TestClient(app).post("/auth/login", json={"username": "bob", "password": "password123"}).status_code == 401
+    with sqlite3.connect(main.DB_FILE) as db:
+        assert db.execute("SELECT COUNT(*) FROM completions WHERE user_id = 2").fetchone()[0] == 0
+    assert [t["title"] for t in client.get("/todos").json()] == ["tester 의 할 일"]
+
+
+def test_legacy_data_not_claimed_without_owner():
+    # LEGACY_OWNER 를 정하지 않으면 주인 없는 v5 데이터는 아무도 가져가지 않는다
+    # (배포 직후 통합 테스트의 일회용 계정이 가져갔다가 계정과 함께 지우는 사고를 막는다)
+    write_legacy([{"id": 5, "title": "옛 할 일"}])
+    main.migrate_legacy_json()
+    client.post("/auth/login", json=TESTER)
+    new_user("first_after_upgrade")
+    assert client.get("/todos").json() == []
+    with sqlite3.connect(main.DB_FILE) as db:
+        assert db.execute("SELECT COUNT(*) FROM todos WHERE user_id IS NULL").fetchone()[0] == 1
+
+
+def test_legacy_data_claimed_only_by_owner():
+    write_legacy([{"id": 5, "title": "옛 할 일"}])
+    main.migrate_legacy_json()
+    main.LEGACY_OWNER = "Owner"                  # 대소문자는 구분하지 않는다
+    client.post("/auth/login", json=TESTER)
+    assert client.get("/todos").json() == []                            # tester 는 주인이 아니다
+    owner = new_user("owner")
+    assert [t["title"] for t in owner.get("/todos").json()] == ["옛 할 일"]
+
+
+def test_upgrade_v5_database(tmp_path, monkeypatch, clock):
+    # v5 DB(user_id 열 없음)를 그대로 두고 v6 를 띄워도, 열을 추가하고 LEGACY_OWNER 가 데이터와 통계를 가져간다
+    v5_db = tmp_path / "v5.db"
+    with sqlite3.connect(v5_db) as db:
+        db.executescript("""
+            CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '', completed INTEGER NOT NULL DEFAULT 0, due_date TEXT,
+                progress INTEGER NOT NULL DEFAULT 0, subtasks TEXT NOT NULL DEFAULT '[]',
+                tags TEXT NOT NULL DEFAULT '[]', repeat TEXT NOT NULL DEFAULT 'none', completed_on TEXT);
+            CREATE TABLE completions (id INTEGER PRIMARY KEY AUTOINCREMENT, todo_id INTEGER NOT NULL,
+                title TEXT NOT NULL, completed_on TEXT NOT NULL);
+            INSERT INTO todos (id, title, completed, completed_on) VALUES (9, 'v5 할 일', 1, '2026-10-07');
+            INSERT INTO completions (todo_id, title, completed_on) VALUES (9, 'v5 할 일', '2026-10-07');
+        """)
+    monkeypatch.setattr(main, "DB_FILE", v5_db)
+    main.LEGACY_OWNER = "owner"
+    owner = new_user("owner")
+    todos = owner.get("/todos").json()
+    assert [(t["id"], t["title"]) for t in todos] == [(9, "v5 할 일")]
+    assert owner.get("/stats").json()["total"] == 1
+
+
+def test_security_headers():
+    headers = client.get("/").headers
+    assert headers["x-frame-options"] == "DENY"                         # 클릭재킹 방지
+    assert headers["x-content-type-options"] == "nosniff"
+    assert "frame-ancestors 'none'" in headers["content-security-policy"]
+    assert client.get("/todos").headers["x-frame-options"] == "DENY"    # API 응답에도 붙는다
+
+
+@pytest.mark.parametrize("url", ["/docs", "/redoc", "/openapi.json"])
+def test_api_docs_disabled_by_default(url):
+    assert client.get(url).status_code == 404

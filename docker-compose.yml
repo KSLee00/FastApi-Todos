@@ -9,6 +9,8 @@ services:
     restart: unless-stopped       # 서버 재부팅·오류 시 자동 재시작
     environment:
       - APP_TZ=Asia/Seoul         # 반복 할 일·통계의 "오늘" 기준 (UTC 를 쓰면 오전 9시에 날짜가 바뀜)
+      - LEGACY_OWNER=${LEGACY_OWNER:-}   # v5 까지의 할 일을 가져갈 아이디 (비우면 아무도 안 가져감)
+      - COOKIE_SECURE=${COOKIE_SECURE:-0} # HTTPS 로 서비스할 때만 1
     volumes:
       - todo_data:/app/data       # SQLite DB — 컨테이너를 새로 만들어도(다시 배포해도) 데이터가 남는다
     security_opt:

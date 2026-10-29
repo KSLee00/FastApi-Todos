@@ -1,19 +1,22 @@
+import hashlib
+import hmac
 import json
 import math
 import os
+import secrets
 import sqlite3
 from collections.abc import Iterator
 from contextlib import asynccontextmanager, closing, contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-APP_VERSION = "5.0.0"                            # 화면 배지와 /version 이 함께 쓰는 단일 출처
+APP_VERSION = "6.0.0"                            # 화면 배지와 /version 이 함께 쓰는 단일 출처
 ENCODING = "utf-8"
 
 BASE_DIR = Path(__file__).resolve().parent       # main.py 가 있는 폴더
@@ -29,19 +32,39 @@ LEGACY_FILES = [DATA_DIR / "todo.json", BASE_DIR / "todo.json"]
 # "오늘"의 기준 — 컨테이너 기본 시간대는 UTC 라서 그대로 쓰면 반복·통계가 오전 9시에 바뀐다
 APP_TZ = ZoneInfo(os.environ.get("APP_TZ", "Asia/Seoul"))
 
+# v5 까지 만든 할 일(주인 없음)을 가져갈 아이디. 비워 두면 아무도 가져가지 않는다.
+# "첫 가입자"로 정하지 않는 이유: 배포 직후 통합 테스트의 일회용 계정이 먼저 가입하면 기존 데이터를 가져간 뒤 함께 지워진다.
+LEGACY_OWNER = os.environ.get("LEGACY_OWNER", "").strip()
+# HTTPS 로 서비스할 때만 1 — 1 이면 쿠키가 HTTPS 에서만 전송된다
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"
+# API 문서(/docs, /redoc, /openapi.json) — 엔드포인트 목록이 그대로 드러나므로 기본은 끈다
+ENABLE_DOCS = os.environ.get("ENABLE_DOCS", "0") == "1"
+
 MAX_SUBTASKS = 20
 MAX_TAGS = 5
 STATS_DAYS = 7                                   # 통계 막대에 보여 줄 최근 일수
+
+SESSION_COOKIE = "todo_session"
+SESSION_DAYS = 7
+MAX_FAILED_LOGINS = 5                            # 연속으로 틀리면
+LOCK_MINUTES = 5                                 # 이만큼 로그인을 막는다
+SCRYPT_N = 2 ** 15                               # 비밀번호 해시 비용 (테스트에서는 낮춰서 빠르게 돌린다)
 
 
 def today() -> date:
     return datetime.now(APP_TZ).date()
 
 
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 # ---------- 데이터 모델 ----------
 
 Tag = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20)]
 Repeat = Literal["none", "daily", "weekly"]
+Username = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=20,
+                                            pattern=r"^[A-Za-z0-9_]+$")]
 
 
 class Subtask(BaseModel):                        # 할 일 안의 작은 단계
@@ -97,6 +120,22 @@ class Stats(BaseModel):
     total: int                                   # 지금까지 완료한 횟수
 
 
+class SignupIn(BaseModel):
+    username: Username                           # 영문·숫자·_ 3~20자
+    password: str = Field(min_length=8, max_length=128)
+
+
+class LoginIn(BaseModel):
+    # 로그인은 형식 검사를 느슨하게 — 틀린 형식도 422 가 아니라 똑같이 401 로 답해 단서를 주지 않는다
+    username: str = Field(max_length=100)
+    password: str = Field(max_length=128)
+
+
+class User(BaseModel):
+    id: int
+    username: str
+
+
 # ---------- SQLite ----------
 
 SCHEMA = """
@@ -119,11 +158,37 @@ CREATE TABLE IF NOT EXISTS completions (
     title        TEXT    NOT NULL,
     completed_on TEXT    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS completions_by_day ON completions (completed_on);
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT    NOT NULL UNIQUE COLLATE NOCASE,   -- 대소문자만 다른 아이디는 같은 아이디
+    password_hash TEXT    NOT NULL,                         -- scrypt 해시 (비밀번호 원문은 저장하지 않는다)
+    failed_logins INTEGER NOT NULL DEFAULT 0,
+    locked_until  TEXT,
+    created_at    TEXT    NOT NULL
+);
+-- 로그인 세션: 쿠키에 담긴 토큰의 SHA-256 만 저장한다 (DB 가 새도 바로 로그인할 수는 없다)
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT    PRIMARY KEY,
+    user_id    INTEGER NOT NULL,
+    expires_at TEXT    NOT NULL
+);
 """
 
 COLUMNS = ("title", "description", "completed", "due_date", "progress",
            "subtasks", "tags", "repeat", "completed_on")
+
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(SCHEMA)
+    # v5 DB 에는 user_id 열이 없다 — 있으면 그대로, 없으면 추가한다 (기존 행은 주인 없음 = NULL)
+    for table in ("todos", "completions"):
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "user_id" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER")
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS todos_by_user ON todos (user_id);
+        CREATE INDEX IF NOT EXISTS completions_by_user_day ON completions (user_id, completed_on);
+    """)
 
 
 @contextmanager
@@ -133,7 +198,7 @@ def transaction() -> Iterator[sqlite3.Connection]:
     DB_FILE.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(DB_FILE, timeout=10, isolation_level=None)) as conn:
         conn.row_factory = sqlite3.Row
-        conn.executescript(SCHEMA)
+        ensure_schema(conn)
         conn.execute("BEGIN IMMEDIATE")
         try:
             yield conn
@@ -157,44 +222,51 @@ def to_row(todo: TodoItem) -> tuple:
 
 def from_row(row: sqlite3.Row) -> TodoItem:
     data = dict(row)
+    data.pop("user_id", None)                    # 소유자는 응답에 넣지 않는다
     data["completed"] = bool(data["completed"])
     data["subtasks"] = json.loads(data["subtasks"])
     data["tags"] = json.loads(data["tags"])
     return TodoItem(**data)
 
 
-def insert(conn: sqlite3.Connection, todo: TodoItem, keep_id: bool = False) -> int:
+def insert(conn: sqlite3.Connection, todo: TodoItem, user_id: int | None, keep_id: bool = False) -> int:
     if keep_id:                                  # 옮겨 담기·테스트용: 원래 id 를 그대로 쓴다
-        conn.execute(f"INSERT INTO todos (id, {', '.join(COLUMNS)}) VALUES (?{', ?' * len(COLUMNS)})",
-                     (todo.id, *to_row(todo)))
+        conn.execute(f"INSERT INTO todos (id, user_id, {', '.join(COLUMNS)}) VALUES (?, ?{', ?' * len(COLUMNS)})",
+                     (todo.id, user_id, *to_row(todo)))
         return todo.id
-    cursor = conn.execute(f"INSERT INTO todos ({', '.join(COLUMNS)}) VALUES ({', '.join('?' * len(COLUMNS))})",
-                          to_row(todo))
+    cursor = conn.execute(f"INSERT INTO todos (user_id, {', '.join(COLUMNS)}) VALUES (?{', ?' * len(COLUMNS)})",
+                          (user_id, *to_row(todo)))
     return cursor.lastrowid
 
 
-def fetch(conn: sqlite3.Connection, todo_id: int) -> TodoItem:
-    row = conn.execute("SELECT * FROM todos WHERE id = ?", (todo_id,)).fetchone()
+def fetch(conn: sqlite3.Connection, todo_id: int, user_id: int) -> TodoItem:
+    # 다른 사람의 할 일도 "없는 할 일"과 똑같이 404 — 그 id 가 있는지조차 알려 주지 않는다
+    row = conn.execute("SELECT * FROM todos WHERE id = ? AND user_id = ?", (todo_id, user_id)).fetchone()
     if row is None:
         raise HTTPException(404, "To-Do item not found")
     return from_row(row)
 
 
-def load_todos() -> list[TodoItem]:
+def load_todos(user_id: int | None = None) -> list[TodoItem]:
     with transaction() as conn:
-        return [from_row(r) for r in conn.execute("SELECT * FROM todos ORDER BY id")]
+        if user_id is None:
+            rows = conn.execute("SELECT * FROM todos ORDER BY id")
+        else:
+            rows = conn.execute("SELECT * FROM todos WHERE user_id = ? ORDER BY id", (user_id,))
+        return [from_row(r) for r in rows]
 
 
-def save_todos(todos: list[TodoItem]) -> None:
+def save_todos(todos: list[TodoItem], user_id: int | None = None) -> None:
     # 전체를 통째로 바꾼다 — 데이터 옮겨 담기와 테스트 준비에서만 쓴다
     with transaction() as conn:
         conn.execute("DELETE FROM todos")
         for todo in todos:
-            insert(conn, todo, keep_id=True)
+            insert(conn, todo, user_id, keep_id=True)
 
 
 def migrate_legacy_json() -> int:
     # DB 가 비어 있고 v4 의 todo.json 이 있으면 옮겨 담고, 다시 옮기지 않도록 이름을 바꿔 둔다
+    # 옮겨 온 할 일은 주인 없음(NULL) — LEGACY_OWNER 계정이 가입·로그인할 때 가져간다
     source = next((f for f in LEGACY_FILES if f.exists()), None)
     if source is None:
         return 0
@@ -203,7 +275,7 @@ def migrate_legacy_json() -> int:
             return 0
         todos = [TodoItem(**t) for t in json.loads(source.read_text(encoding=ENCODING))]
         for todo in todos:
-            insert(conn, todo, keep_id=True)
+            insert(conn, todo, None, keep_id=True)
     if not todos:                                # 빈 초기 데이터(레포의 todo.json)는 그대로 둔다 — git 에서 지워진 것처럼 보이지 않게
         return 0
     try:
@@ -211,6 +283,63 @@ def migrate_legacy_json() -> int:
     except OSError:                              # 읽기 전용 위치여도 DB 가 차 있으니 다음엔 건너뛴다
         pass
     return len(todos)
+
+
+# ---------- 계정 · 로그인 ----------
+
+def hash_password(password: str) -> str:
+    # scrypt: 파이썬 기본 모듈로 쓸 수 있는 느린 해시 — 비밀번호마다 다른 salt 를 붙인다
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=SCRYPT_N, r=8, p=1, maxmem=2 ** 26, dklen=32)
+    return f"scrypt${SCRYPT_N}$8$1${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    _, n, r, p, salt, digest = stored.split("$")
+    candidate = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=int(n), r=int(r), p=int(p),
+                               maxmem=2 ** 26, dklen=len(digest) // 2)
+    return hmac.compare_digest(candidate.hex(), digest)   # 비교 시간으로 정답을 추측하지 못하게
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def start_session(conn: sqlite3.Connection, user_id: int, response: Response) -> None:
+    now = utcnow()
+    conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now.isoformat(),))   # 만료된 세션 정리
+    token = secrets.token_urlsafe(32)
+    conn.execute("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+                 (token_hash(token), user_id, (now + timedelta(days=SESSION_DAYS)).isoformat()))
+    response.set_cookie(
+        SESSION_COOKIE, token, max_age=SESSION_DAYS * 86400, path="/",
+        httponly=True,                           # 스크립트가 쿠키를 읽지 못한다 (XSS 로 세션을 훔치기 어렵게)
+        samesite="strict",                       # 다른 사이트에서 보낸 요청에는 쿠키를 붙이지 않는다 (CSRF 방어)
+        secure=COOKIE_SECURE,
+    )
+
+
+def claim_legacy(conn: sqlite3.Connection, user: User) -> None:
+    # 주인 없는 v5 데이터를 LEGACY_OWNER 로 지정한 계정에 넘긴다
+    if LEGACY_OWNER and user.username.casefold() == LEGACY_OWNER.casefold():
+        conn.execute("UPDATE todos SET user_id = ? WHERE user_id IS NULL", (user.id,))
+        conn.execute("UPDATE completions SET user_id = ? WHERE user_id IS NULL", (user.id,))
+
+
+def current_user(token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> User:
+    if not token:
+        raise HTTPException(401, "로그인이 필요합니다.")
+    with transaction() as conn:
+        row = conn.execute(
+            """SELECT users.id, users.username FROM sessions JOIN users ON users.id = sessions.user_id
+               WHERE sessions.token_hash = ? AND sessions.expires_at > ?""",
+            (token_hash(token), utcnow().isoformat())).fetchone()
+    if row is None:
+        raise HTTPException(401, "로그인이 필요합니다.")
+    return User(id=row["id"], username=row["username"])
+
+
+CurrentUser = Annotated[User, Depends(current_user)]
 
 
 # ---------- 반복 할 일 ----------
@@ -237,10 +366,10 @@ def next_due(due: date | None, repeat: Repeat, now: date) -> date | None:
     return due + timedelta(days=step * math.ceil((now - due).days / step))
 
 
-def refresh_repeats(conn: sqlite3.Connection) -> None:
+def refresh_repeats(conn: sqlite3.Connection, user_id: int) -> None:
     # 완료한 반복 할 일은 주기가 지나면 다시 미완료로 돌아온다 (완료 기록은 completions 에 남아 있다)
     now = today()
-    rows = conn.execute("SELECT * FROM todos WHERE repeat != 'none' AND completed = 1")
+    rows = conn.execute("SELECT * FROM todos WHERE user_id = ? AND repeat != 'none' AND completed = 1", (user_id,))
     for todo in map(from_row, rows.fetchall()):
         if period_passed(todo, now):
             reset = todo.model_copy(update={
@@ -256,12 +385,13 @@ def write(conn: sqlite3.Connection, todo: TodoItem) -> None:
                  (*to_row(todo), todo.id))
 
 
-def record_completion_change(conn: sqlite3.Connection, old: TodoItem | None, new: TodoItem) -> TodoItem:
+def record_completion_change(conn: sqlite3.Connection, user_id: int,
+                             old: TodoItem | None, new: TodoItem) -> TodoItem:
     # 미완료 → 완료: 오늘 완료로 기록한다. 완료 → 미완료: 실수로 누른 것으로 보고 그 기록을 지운다.
     was_done = bool(old and old.completed)
     if new.completed and not was_done:
-        conn.execute("INSERT INTO completions (todo_id, title, completed_on) VALUES (?, ?, ?)",
-                     (new.id, new.title, today().isoformat()))
+        conn.execute("INSERT INTO completions (user_id, todo_id, title, completed_on) VALUES (?, ?, ?, ?)",
+                     (user_id, new.id, new.title, today().isoformat()))
         return new.model_copy(update={"completed_on": today()})
     if was_done and not new.completed:
         conn.execute("""DELETE FROM completions WHERE id = (
@@ -286,6 +416,21 @@ def matches(todo: TodoItem, q: str, tag: str) -> bool:
 # ---------- API ----------
 
 NOT_FOUND = {404: {"description": "To-Do item not found"}}   # API 문서(/docs)에 404 응답을 표시
+UNAUTHORIZED = {401: {"description": "로그인이 필요합니다."}}
+AUTH_REQUIRED = {**UNAUTHORIZED, **NOT_FOUND}
+
+# 브라우저가 지키는 보안 헤더 — 클릭재킹(다른 사이트가 프레임으로 감싸기), MIME 추측, 외부 스크립트를 막는다
+# 화면이 인라인 <script>·<style> 을 쓰므로 그 둘만 'unsafe-inline' 을 허용한다
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    ),
+}
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -293,49 +438,128 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="To-Do List API", version=APP_VERSION, lifespan=lifespan)
+app = FastAPI(
+    title="To-Do List API", version=APP_VERSION, lifespan=lifespan,
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
+)
 
 
-@app.get("/todos")                               # 목록 조회 — ?q=검색어 &tag=태그 로 거를 수 있다
-def get_todos(q: str = "", tag: str = "") -> list[TodoItem]:
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.update(SECURITY_HEADERS)
+    return response
+
+
+@app.post("/auth/signup", status_code=201, responses={409: {"description": "이미 있는 아이디"}})
+def signup(payload: SignupIn, response: Response) -> User:
     with transaction() as conn:
-        refresh_repeats(conn)
-        todos = [from_row(r) for r in conn.execute("SELECT * FROM todos ORDER BY id")]
+        if conn.execute("SELECT 1 FROM users WHERE username = ?", (payload.username,)).fetchone():
+            raise HTTPException(409, "이미 사용 중인 아이디입니다.")
+        cursor = conn.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                              (payload.username, hash_password(payload.password), utcnow().isoformat()))
+        user = User(id=cursor.lastrowid, username=payload.username)
+        claim_legacy(conn, user)
+        start_session(conn, user.id, response)
+    return user
+
+
+@app.post("/auth/login", responses={**UNAUTHORIZED, 429: {"description": "로그인 시도 제한"}})
+def login(payload: LoginIn, response: Response) -> User:
+    # 실패 횟수는 저장해야 하므로 트랜잭션을 끝낸(COMMIT) 뒤에 오류를 돌려준다
+    now = utcnow()
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM users WHERE username = ?", (payload.username.strip(),)).fetchone()
+        if row is None:
+            hash_password(payload.password)      # 없는 아이디도 같은 시간을 써서 아이디가 있는지 응답 시간으로 알 수 없게
+            outcome = "fail"
+        elif row["locked_until"] and row["locked_until"] > now.isoformat():
+            outcome = "locked"
+        elif not verify_password(payload.password, row["password_hash"]):
+            failed = row["failed_logins"] + 1
+            locked_until = (now + timedelta(minutes=LOCK_MINUTES)).isoformat() if failed >= MAX_FAILED_LOGINS else None
+            conn.execute("UPDATE users SET failed_logins = ?, locked_until = ? WHERE id = ?",
+                         (0 if locked_until else failed, locked_until, row["id"]))
+            outcome = "fail"
+        else:
+            conn.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?", (row["id"],))
+            user = User(id=row["id"], username=row["username"])
+            claim_legacy(conn, user)
+            start_session(conn, user.id, response)
+            outcome = "ok"
+    if outcome == "locked":
+        raise HTTPException(429, f"로그인 시도가 너무 많습니다. {LOCK_MINUTES}분 뒤 다시 시도해 주세요.")
+    if outcome == "fail":
+        raise HTTPException(401, "아이디 또는 비밀번호가 올바르지 않습니다.")
+    return user
+
+
+@app.post("/auth/logout", status_code=204)
+def logout(response: Response, token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> None:
+    if token:
+        with transaction() as conn:
+            conn.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash(token),))
+    response.delete_cookie(SESSION_COOKIE, path="/")
+
+
+@app.get("/auth/me", responses=UNAUTHORIZED)
+def me(user: CurrentUser) -> User:
+    return user
+
+
+@app.delete("/auth/me", status_code=204, responses=UNAUTHORIZED)  # 계정 삭제 — 내 할 일·기록·세션도 모두 지운다
+def delete_account(user: CurrentUser, response: Response) -> None:
+    with transaction() as conn:
+        for table in ("todos", "completions", "sessions"):
+            conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (user.id,))
+        conn.execute("DELETE FROM users WHERE id = ?", (user.id,))
+    response.delete_cookie(SESSION_COOKIE, path="/")
+
+
+@app.get("/todos", responses=UNAUTHORIZED)       # 목록 조회 — ?q=검색어 &tag=태그 로 거를 수 있다
+def get_todos(user: CurrentUser, q: str = "", tag: str = "") -> list[TodoItem]:
+    with transaction() as conn:
+        refresh_repeats(conn, user.id)
+        rows = conn.execute("SELECT * FROM todos WHERE user_id = ? ORDER BY id", (user.id,))
+        todos = [from_row(r) for r in rows]
     return [t for t in todos if matches(t, q.strip(), tag.strip())]
 
 
-@app.post("/todos", status_code=201)             # 추가 — id 는 서버가 매긴다
-def create_todo(payload: TodoIn) -> TodoItem:
+@app.post("/todos", status_code=201, responses=UNAUTHORIZED)  # 추가 — id 는 서버가 매긴다
+def create_todo(user: CurrentUser, payload: TodoIn) -> TodoItem:
     with transaction() as conn:
         todo = TodoItem(id=0, **payload.model_dump())
-        todo = todo.model_copy(update={"id": insert(conn, todo)})
-        todo = record_completion_change(conn, None, todo)   # 처음부터 완료로 만들면 오늘 완료로 센다
+        todo = todo.model_copy(update={"id": insert(conn, todo, user.id)})
+        todo = record_completion_change(conn, user.id, None, todo)   # 처음부터 완료로 만들면 오늘 완료로 센다
         write(conn, todo)
     return todo
 
 
-@app.put("/todos/{todo_id}", responses=NOT_FOUND)  # 수정
-def update_todo(todo_id: int, payload: TodoIn) -> TodoItem:
+@app.put("/todos/{todo_id}", responses=AUTH_REQUIRED)  # 수정
+def update_todo(user: CurrentUser, todo_id: int, payload: TodoIn) -> TodoItem:
     with transaction() as conn:
-        refresh_repeats(conn)
-        old = fetch(conn, todo_id)               # 없는 id 면 여기서 404 (트랜잭션은 ROLLBACK)
-        todo = record_completion_change(conn, old, TodoItem(id=todo_id, **payload.model_dump()))
+        refresh_repeats(conn, user.id)
+        old = fetch(conn, todo_id, user.id)      # 없거나 남의 id 면 여기서 404 (트랜잭션은 ROLLBACK)
+        todo = record_completion_change(conn, user.id, old, TodoItem(id=todo_id, **payload.model_dump()))
         write(conn, todo)
     return todo
 
 
-@app.delete("/todos/{todo_id}", status_code=204, responses=NOT_FOUND)  # 삭제 — 완료 기록(통계)은 남긴다
-def delete_todo(todo_id: int) -> None:
+@app.delete("/todos/{todo_id}", status_code=204, responses=AUTH_REQUIRED)  # 삭제 — 완료 기록(통계)은 남긴다
+def delete_todo(user: CurrentUser, todo_id: int) -> None:
     with transaction() as conn:
-        fetch(conn, todo_id)
+        fetch(conn, todo_id, user.id)
         conn.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
 
 
-@app.get("/stats")                               # 학습 통계 — 연속 완료일과 최근 7일 완료 개수
-def get_stats() -> Stats:
+@app.get("/stats", responses=UNAUTHORIZED)       # 학습 통계 — 연속 완료일과 최근 7일 완료 개수
+def get_stats(user: CurrentUser) -> Stats:
     now = today()
     with transaction() as conn:
-        rows = conn.execute("SELECT completed_on, COUNT(*) FROM completions GROUP BY completed_on").fetchall()
+        rows = conn.execute("""SELECT completed_on, COUNT(*) FROM completions
+                               WHERE user_id = ? GROUP BY completed_on""", (user.id,)).fetchall()
     per_day = {date.fromisoformat(day): count for day, count in rows}
 
     # 오늘 아직 못 했어도 어제까지 이어졌으면 연속 기록은 살아 있다
@@ -351,11 +575,11 @@ def get_stats() -> Stats:
                  recent_total=sum(d.count for d in recent), total=sum(per_day.values()))
 
 
-@app.get("/version")                             # 화면 배지가 읽어가는 앱 버전
+@app.get("/version")                             # 화면 배지가 읽어가는 앱 버전 (로그인 없이 볼 수 있다)
 def get_version() -> dict[str, str]:
     return {"version": APP_VERSION}
 
 
-@app.get("/", include_in_schema=False)           # 화면 서빙
+@app.get("/", include_in_schema=False)           # 화면 서빙 — 로그인 화면도 같은 페이지가 보여 준다
 def read_root() -> FileResponse:
     return FileResponse(INDEX_FILE, media_type="text/html")

@@ -1,16 +1,21 @@
 # 배포된 서버에 실제 HTTP 요청을 보내 API를 확인하는 통합 테스트
-# 실행: BASE_URL=http://[서버 IP]:[port num] EXPECTED_VERSION=5.0.0 pytest fastapi-app/tests/test_deployed_api.py
+# 실행: BASE_URL=http://[서버 IP]:[port num] EXPECTED_VERSION=6.0.0 pytest fastapi-app/tests/test_deployed_api.py
 # BASE_URL 이 없으면 이 파일은 통째로 건너뛴다 → pytest fastapi-app/tests 는 단위 테스트만 실행된다
+# v6 부터는 일회용 계정(it_xxxx)으로 가입해서 테스트하고, 끝나면 계정을 삭제한다 → 실제 사용자 데이터는 건드리지 않는다
+# (선택) INTEGRATION_USER / INTEGRATION_PASSWORD: 재배포 후 데이터 유지 검사에 쓸 고정 계정 — 없으면 그 검사만 건너뛴다
 #
-# v1 ~ v5 가 동시에 떠 있어도 이 파일 하나로 모두 검사한다.
+# v1 ~ v6 가 동시에 떠 있어도 이 파일 하나로 모두 검사한다.
 # 먼저 서버 버전을 알아낸 뒤, 그 버전에 없는 기능의 테스트는 skip 한다.
 #   v1: CRUD                     v2: + /version, 설명 500자 제한
 #   v3: + 마감일(due_date)        v4: + 진행도, 하위 작업, 동시 요청 잠금
 #   v5: + SQLite·볼륨(다시 배포해도 데이터 유지), 태그·검색, 반복 할 일, 학습 통계(/stats)
+#   v6: + 회원가입·로그인(사용자별 데이터), 보안 헤더, API 문서 비공개
 import os
+import secrets
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 import httpx2
 import pytest
@@ -21,6 +26,8 @@ if not BASE_URL:
     pytest.skip("BASE_URL 이 없어 통합 테스트를 건너뜀 (배포 주소를 주면 실행된다)", allow_module_level=True)
 # 이 주소에 떠 있어야 하는 버전 (예: 3.0.0). 비워 두면 버전 일치 검사는 건너뛴다.
 EXPECTED_VERSION = os.environ.get("EXPECTED_VERSION", "")
+INTEGRATION_USER = os.environ.get("INTEGRATION_USER", "")
+INTEGRATION_PASSWORD = os.environ.get("INTEGRATION_PASSWORD", "")
 
 
 def parse(version):
@@ -31,7 +38,7 @@ def wait_until_up(http, seconds=30):
     # 배포 직후에는 컨테이너가 아직 뜨는 중일 수 있으므로 응답이 올 때까지 기다림
     for _ in range(seconds):
         try:
-            if http.get("/todos").status_code == 200:
+            if http.get("/todos").status_code < 500:   # v6 는 로그인 전이라 401 — 응답만 오면 떠 있는 것
                 return
         except httpx2.TransportError:  # 연결 거부, 타임아웃 등
             pass
@@ -39,22 +46,44 @@ def wait_until_up(http, seconds=30):
     pytest.fail(f"{BASE_URL} 에 접속할 수 없음 (컨테이너 실행 여부, 포트, 방화벽 확인)")
 
 
-@pytest.fixture(scope="session")
-def client():
-    # 단위 테스트의 TestClient(app) 대신, 실제 배포 주소로 요청을 보내는 클라이언트
-    with httpx2.Client(base_url=BASE_URL, timeout=5) as http:
-        wait_until_up(http)
-        yield http
-
-
-@pytest.fixture(scope="session")
-def server_version(client):
+def detect_version(http):
     # v1 에는 /version 이 없으므로 404 면 1.0.0 으로 본다
-    response = client.get("/version")
+    response = http.get("/version")
     if response.status_code == 404:
         return "1.0.0"
     assert response.status_code == 200
     return response.json()["version"]
+
+
+@contextmanager
+def throwaway_account():
+    # v6 서버용 일회용 계정 — 가입해서 쿠키를 받은 클라이언트를 주고, 끝나면(실패해도) 계정째 지운다
+    with httpx2.Client(base_url=BASE_URL, timeout=5) as http:
+        credentials = {"username": f"it_{uuid.uuid4().hex[:10]}", "password": secrets.token_urlsafe(16)}
+        response = http.post("/auth/signup", json=credentials)
+        assert response.status_code == 201, response.text
+        try:
+            yield http
+        finally:
+            http.delete("/auth/me")              # 할 일·완료 기록·세션까지 함께 삭제
+
+
+@pytest.fixture(scope="session")
+def server_version():
+    with httpx2.Client(base_url=BASE_URL, timeout=5) as http:
+        wait_until_up(http)
+        return detect_version(http)
+
+
+@pytest.fixture(scope="session")
+def client(server_version):
+    # 단위 테스트의 TestClient(app) 대신, 실제 배포 주소로 요청을 보내는 클라이언트
+    if parse(server_version) >= (6, 0, 0):
+        with throwaway_account() as http:        # v6: 로그인한 일회용 계정
+            yield http
+        return
+    with httpx2.Client(base_url=BASE_URL, timeout=5) as http:
+        yield http
 
 
 def since(version):
@@ -293,13 +322,98 @@ def test_completion_updates_stats(client, todo):
 PERSIST_TITLE = "통합테스트-배포유지확인 (지우지 마세요)"
 
 
+@contextmanager
+def persist_account(client, server_version):
+    # v5: 공용 목록 그대로. v6: 일회용 계정은 매번 지워지므로 INTEGRATION_USER 고정 계정으로 확인한다
+    if parse(server_version) < (6, 0, 0):
+        yield client
+        return
+    if not (INTEGRATION_USER and INTEGRATION_PASSWORD):
+        pytest.skip("INTEGRATION_USER / INTEGRATION_PASSWORD 가 없어 재배포 데이터 유지 검사를 건너뜀")
+    with httpx2.Client(base_url=BASE_URL, timeout=5) as http:
+        credentials = {"username": INTEGRATION_USER, "password": INTEGRATION_PASSWORD}
+        if http.post("/auth/login", json=credentials).status_code != 200:
+            assert http.post("/auth/signup", json=credentials).status_code == 201   # 처음 실행: 계정 만들기
+        yield http
+
+
 @since("5.0.0")
-def test_data_survives_redeploy(client):
+def test_data_survives_redeploy(client, server_version):
     # 배포할 때마다 실행되면, 앞선 배포 때 만든 항목이 이번 배포 뒤에도 남아 있는지 확인한다.
     # 처음 실행하면 항목만 만들고 skip — 다음 배포 뒤 실행부터 실제로 검사된다.
-    existing = [t for t in client.get("/todos").json() if t["title"] == PERSIST_TITLE]
-    if not existing:
-        response = client.post("/todos", json={"title": PERSIST_TITLE, "description": "Docker 볼륨 확인용"})
-        assert response.status_code == 201
-        pytest.skip("확인용 항목을 만들었음 — 다음 배포 뒤 실행하면 데이터 유지 여부를 검사한다")
-    assert len(existing) == 1                    # 중복으로 만들어졌다면 이전 데이터가 한 번 사라졌던 것
+    with persist_account(client, server_version) as http:
+        existing = [t for t in http.get("/todos").json() if t["title"] == PERSIST_TITLE]
+        if not existing:
+            response = http.post("/todos", json={"title": PERSIST_TITLE, "description": "Docker 볼륨 확인용"})
+            assert response.status_code == 201
+            pytest.skip("확인용 항목을 만들었음 — 다음 배포 뒤 실행하면 데이터 유지 여부를 검사한다")
+        assert len(existing) == 1                # 중복으로 만들어졌다면 이전 데이터가 한 번 사라졌던 것
+
+
+# ---------- v6 부터 ----------
+
+@since("6.0.0")
+def test_index_page_is_v6(client):
+    html = client.get("/").text
+    assert 'id="auth-form"' in html             # 로그인 화면
+    assert "회원가입" in html
+
+
+@since("6.0.0")
+def test_requires_login():
+    with httpx2.Client(base_url=BASE_URL, timeout=5) as anonymous:
+        assert anonymous.get("/todos").status_code == 401
+        assert anonymous.post("/todos", json={"title": "로그인 없이"}).status_code == 401
+        assert anonymous.get("/stats").status_code == 401
+        assert anonymous.get("/version").status_code == 200   # 버전은 로그인 없이 볼 수 있다
+
+
+@since("6.0.0")
+def test_users_are_isolated(client, todo):
+    with throwaway_account() as other:
+        assert other.get("/todos").json() == []                                   # 남의 할 일은 안 보인다
+        assert other.put(f"/todos/{todo['id']}", json={"title": "가로채기"}).status_code == 404
+        assert other.delete(f"/todos/{todo['id']}").status_code == 404
+    assert get_item(client, todo["id"])["title"] == todo["title"]                # 원래 주인 것은 그대로
+
+
+@since("6.0.0")
+def test_logout_and_login_again():
+    with httpx2.Client(base_url=BASE_URL, timeout=5) as http:
+        credentials = {"username": f"it_{uuid.uuid4().hex[:10]}", "password": secrets.token_urlsafe(16)}
+        assert http.post("/auth/signup", json=credentials).status_code == 201
+        try:
+            assert http.post("/auth/logout").status_code == 204
+            assert http.get("/todos").status_code == 401                         # 로그아웃하면 바로 막힌다
+            wrong = {**credentials, "password": "wrong-password"}
+            assert http.post("/auth/login", json=wrong).status_code == 401
+        finally:
+            http.post("/auth/login", json=credentials)                           # 다시 로그인해야 계정을 지울 수 있다
+            assert http.delete("/auth/me").status_code == 204
+
+
+@since("6.0.0")
+def test_signup_cookie_flags():
+    with httpx2.Client(base_url=BASE_URL, timeout=5) as http:
+        credentials = {"username": f"it_{uuid.uuid4().hex[:10]}", "password": secrets.token_urlsafe(16)}
+        response = http.post("/auth/signup", json=credentials)
+        try:
+            cookie = response.headers["set-cookie"].lower()
+            assert "httponly" in cookie
+            assert "samesite=strict" in cookie
+        finally:
+            http.delete("/auth/me")
+
+
+@since("6.0.0")
+def test_security_headers(client):
+    headers = client.get("/").headers
+    assert headers["x-frame-options"] == "DENY"
+    assert headers["x-content-type-options"] == "nosniff"
+    assert "frame-ancestors 'none'" in headers["content-security-policy"]
+
+
+@since("6.0.0")
+def test_api_docs_hidden(client):
+    assert client.get("/docs").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
