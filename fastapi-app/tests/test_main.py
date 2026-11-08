@@ -143,7 +143,7 @@ def test_delete_todo_not_found():
 
 
 def test_version():
-    assert client.get("/version").json() == {"version": "6.0.0"}
+    assert client.get("/version").json() == {"version": "7.0.0"}
 
 
 # ---------- 진행도 · 하위 작업 (v4~) ----------
@@ -461,7 +461,7 @@ def new_user(username, password="password123"):
 
 @pytest.mark.parametrize("method, url", [
     ("get", "/todos"), ("post", "/todos"), ("put", "/todos/1"), ("delete", "/todos/1"),
-    ("get", "/stats"), ("get", "/auth/me"), ("delete", "/auth/me"),
+    ("get", "/stats"), ("get", "/calendar"), ("get", "/auth/me"), ("delete", "/auth/me"),
 ])
 def test_requires_login(method, url):
     anonymous = TestClient(app)
@@ -657,3 +657,116 @@ def test_metrics_endpoint_without_login():
 
 def test_metrics_hidden_from_api_docs():
     assert "/metrics" not in [route.path for route in app.routes if getattr(route, "include_in_schema", False)]
+
+
+# ---------- 캘린더 (v7~) ----------
+
+def calendar(month=None):
+    response = client.get("/calendar", params={"month": month} if month else None)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def day_items(cal, day):
+    # 그 날짜 칸에 있는 할 일을 (제목, 미리 보기 여부) 로
+    entry = next(d for d in cal["days"] if d["date"] == day)
+    return [(i["title"], i["projected"]) for i in entry["items"]]
+
+
+def dates_of(cal, title):
+    return [d["date"] for d in cal["days"] if any(i["title"] == title for i in d["items"])]
+
+
+def test_calendar_defaults_to_this_month(clock):
+    cal = calendar()
+    assert cal["month"] == "2026-10"
+    assert cal["today"] == TODAY.isoformat()
+    assert len(cal["days"]) == 31
+    assert cal["days"][0]["date"] == "2026-10-01"
+    assert cal["days"][-1]["date"] == "2026-10-31"
+
+
+@pytest.mark.parametrize("month, last_day", [
+    ("2026-02", "2026-02-28"),                   # 평년 2월
+    ("2028-02", "2028-02-29"),                   # 윤년 2월
+    ("2026-12", "2026-12-31"),                   # 12월 → 다음 해로 넘어가는 계산
+])
+def test_calendar_month_lengths(clock, month, last_day):
+    assert calendar(month)["days"][-1]["date"] == last_day
+
+
+@pytest.mark.parametrize("month", ["2026-13", "2026-00", "2026-1", "abc", "2026/10"])
+def test_calendar_rejects_bad_month(month):
+    assert client.get("/calendar", params={"month": month}).status_code == 422
+
+
+def test_calendar_shows_todo_on_due_date_only(clock):
+    create(title="마감 있음", due_date="2026-10-20")
+    create(title="마감 없음")                    # 마감일이 없으면 달력에 나타나지 않는다
+    cal = calendar()
+    assert dates_of(cal, "마감 있음") == ["2026-10-20"]
+    assert dates_of(cal, "마감 없음") == []
+    assert dates_of(calendar("2026-11"), "마감 있음") == []
+
+
+def test_calendar_marks_overdue_and_completed(clock):
+    create(title="지난 마감", due_date="2026-10-05")
+    update(create(title="끝낸 일", due_date="2026-10-03"), completed=True)
+    cal = calendar()
+    late = next(d for d in cal["days"] if d["date"] == "2026-10-05")["items"][0]
+    done = next(d for d in cal["days"] if d["date"] == "2026-10-03")["items"][0]
+    assert (late["overdue"], late["completed"]) == (True, False)
+    assert (done["overdue"], done["completed"]) == (False, True)   # 끝낸 일은 마감이 지나도 overdue 아님
+
+
+def test_calendar_weekly_repeat_projection(clock):
+    create(title="주간 모의고사", repeat="weekly", due_date="2026-10-07")
+    cal = calendar()
+    assert dates_of(cal, "주간 모의고사") == ["2026-10-07", "2026-10-14", "2026-10-21", "2026-10-28"]
+    assert day_items(cal, "2026-10-07") == [("주간 모의고사", False)]   # 실제 마감일
+    assert day_items(cal, "2026-10-14") == [("주간 모의고사", True)]    # 다음 주기 미리 보기
+    # 다음 달에도 같은 요일(수요일)로 이어진다
+    assert dates_of(calendar("2026-11"), "주간 모의고사") == ["2026-11-04", "2026-11-11", "2026-11-18", "2026-11-25"]
+
+
+def test_calendar_daily_repeat_skips_past_projection(clock):
+    # 마감이 지난 매일 반복: 실제 마감일(10/5)은 overdue 로 남고, 미리 보기는 오늘(10/7)부터만
+    create(title="매일 1문제", repeat="daily", due_date="2026-10-05")
+    days = dates_of(calendar(), "매일 1문제")
+    assert days[0] == "2026-10-05"
+    assert "2026-10-06" not in days                    # 지나간 날은 반복되지 않았으므로 그리지 않는다
+    assert days[1:] == [f"2026-10-{d:02d}" for d in range(7, 32)]
+
+
+def test_calendar_projection_is_not_completed(clock):
+    update(create(title="주간", repeat="weekly", due_date="2026-10-07"), completed=True)
+    cal = calendar()
+    today_item = next(d for d in cal["days"] if d["date"] == "2026-10-07")["items"][0]
+    next_item = next(d for d in cal["days"] if d["date"] == "2026-10-14")["items"][0]
+    assert today_item["completed"] is True
+    assert next_item["completed"] is False             # 다음 주 것은 아직 하지 않은 일
+
+
+def test_calendar_counts_completions(clock):
+    update(create(title="A"), completed=True)
+    update(create(title="B"), completed=True)
+    clock.advance(1)
+    update(create(title="C"), completed=True)
+    cal = calendar()
+    counts = {d["date"]: d["completed"] for d in cal["days"] if d["completed"]}
+    assert counts == {"2026-10-07": 2, "2026-10-08": 1}
+
+
+def test_calendar_is_per_user(clock):
+    create(title="tester 의 할 일", due_date="2026-10-20")
+    update(create(title="완료"), completed=True)
+    bob = new_user("bob")
+    cal = bob.get("/calendar").json()
+    assert all(d["items"] == [] and d["completed"] == 0 for d in cal["days"])
+
+
+def test_calendar_lists_real_due_before_projection(clock):
+    # 칸에 몇 개만 보이므로, 같은 날이면 실제 마감이 반복 예정보다 앞에 온다
+    create(title="매일 반복", repeat="daily", due_date="2026-10-07")
+    create(title="20일 마감", due_date="2026-10-20")
+    assert day_items(calendar(), "2026-10-20") == [("20일 마감", False), ("매일 반복", True)]

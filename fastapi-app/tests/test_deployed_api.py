@@ -1,15 +1,16 @@
 # 배포된 서버에 실제 HTTP 요청을 보내 API를 확인하는 통합 테스트
-# 실행: BASE_URL=http://[서버 IP]:[port num] EXPECTED_VERSION=6.0.0 pytest fastapi-app/tests/test_deployed_api.py
+# 실행: BASE_URL=http://[서버 IP]:[port num] EXPECTED_VERSION=7.0.0 pytest fastapi-app/tests/test_deployed_api.py
 # BASE_URL 이 없으면 이 파일은 통째로 건너뛴다 → pytest fastapi-app/tests 는 단위 테스트만 실행된다
 # v6 부터는 일회용 계정(it_xxxx)으로 가입해서 테스트하고, 끝나면 계정을 삭제한다 → 실제 사용자 데이터는 건드리지 않는다
 # (선택) INTEGRATION_USER / INTEGRATION_PASSWORD: 재배포 후 데이터 유지 검사에 쓸 고정 계정 — 없으면 그 검사만 건너뛴다
 #
-# v1 ~ v6 가 동시에 떠 있어도 이 파일 하나로 모두 검사한다.
+# v1 ~ v7 가 동시에 떠 있어도 이 파일 하나로 모두 검사한다.
 # 먼저 서버 버전을 알아낸 뒤, 그 버전에 없는 기능의 테스트는 skip 한다.
 #   v1: CRUD                     v2: + /version, 설명 500자 제한
 #   v3: + 마감일(due_date)        v4: + 진행도, 하위 작업, 동시 요청 잠금
 #   v5: + SQLite·볼륨(다시 배포해도 데이터 유지), 태그·검색, 반복 할 일, 학습 통계(/stats)
-#   v6: + 회원가입·로그인(사용자별 데이터), 보안 헤더, API 문서 비공개
+#   v6: + 회원가입·로그인(사용자별 데이터), 보안 헤더, API 문서 비공개, /metrics
+#   v7: + 캘린더 보기(/calendar)
 import os
 import secrets
 import time
@@ -426,3 +427,31 @@ def test_metrics_endpoint():
         response = anonymous.get("/metrics")
     assert response.status_code == 200
     assert "http_requests_total" in response.text
+
+
+# ---------- v7 부터 ----------
+
+@since("7.0.0")
+def test_index_page_is_v7(client):
+    html = client.get("/").text
+    assert 'id="view-switch"' in html           # 목록 · 달력 전환 탭
+    assert 'id="cal-grid"' in html
+
+
+@since("7.0.0")
+def test_calendar_shows_due_todo(client, todo):
+    calendar = client.get("/calendar").json()
+    month = calendar["month"]                    # 서버 기준 이번 달
+    due = f"{month}-15"
+    assert client.put(f"/todos/{todo['id']}", json={"title": todo["title"], "due_date": due}).status_code == 200
+    days = client.get("/calendar", params={"month": month}).json()["days"]
+    day = next(d for d in days if d["date"] == due)
+    assert todo["id"] in [item["id"] for item in day["items"]]
+    assert calendar["today"].startswith(month)
+
+
+@since("7.0.0")
+def test_calendar_requires_login_and_valid_month(client):
+    with httpx2.Client(base_url=BASE_URL, timeout=5) as anonymous:
+        assert anonymous.get("/calendar").status_code == 401
+    assert client.get("/calendar", params={"month": "2026-13"}).status_code == 422

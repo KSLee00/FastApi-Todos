@@ -12,12 +12,12 @@ from pathlib import Path
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-APP_VERSION = "6.0.0"                            # 화면 배지와 /version 이 함께 쓰는 단일 출처
+APP_VERSION = "7.0.0"                            # 화면 배지와 /version 이 함께 쓰는 단일 출처
 ENCODING = "utf-8"
 
 BASE_DIR = Path(__file__).resolve().parent       # main.py 가 있는 폴더
@@ -120,6 +120,27 @@ class Stats(BaseModel):
     recent: list[DayCount]                       # 최근 STATS_DAYS 일의 날짜별 완료 개수 (오래된 날 → 오늘)
     recent_total: int
     total: int                                   # 지금까지 완료한 횟수
+
+
+class CalendarItem(BaseModel):                   # 달력 칸에 표시할 할 일 하나
+    id: int
+    title: str
+    completed: bool
+    repeat: Repeat
+    projected: bool                              # 반복 할 일의 "다음 예정일" — 실제 마감일이 아니라 미리 보여 주는 날
+    overdue: bool                                # 마감이 지났는데 아직 미완료
+
+
+class CalendarDay(BaseModel):
+    date: date
+    items: list[CalendarItem]
+    completed: int                               # 그날 완료한 횟수 (학습 통계와 같은 기록)
+
+
+class Calendar(BaseModel):
+    month: str                                   # "YYYY-MM"
+    today: date
+    days: list[CalendarDay]                      # 그 달 1일부터 말일까지 하루씩
 
 
 class SignupIn(BaseModel):
@@ -368,6 +389,39 @@ def next_due(due: date | None, repeat: Repeat, now: date) -> date | None:
     return due + timedelta(days=step * math.ceil((now - due).days / step))
 
 
+def occurrences(todo: TodoItem, start: date, end: date, now: date) -> list[tuple[date, bool]]:
+    """start~end 기간에 이 할 일이 달력에 나타날 날짜와 '미리 보기(projected)' 여부.
+
+    - 마감일이 없는 할 일은 달력에 나타나지 않는다 (어느 날에 둘지 정할 기준이 없다).
+    - 반복하지 않는 할 일은 마감일 하루에만 나타난다.
+    - 반복 할 일은 마감일과, 그 뒤로 반복 주기마다 돌아올 날에 나타난다.
+      다만 미리 보기는 오늘 이후만 — 지나간 날은 실제로 반복되지 않았으므로 그리지 않는다.
+    """
+    due = todo.due_date
+    if due is None:
+        return []
+    if todo.repeat == "none":
+        return [(due, False)] if start <= due <= end else []
+
+    step = timedelta(days=1 if todo.repeat == "daily" else 7)
+    found = [(due, False)] if start <= due <= end else []
+    first = max(due + step, start, now)          # 미리 보기는 마감일 다음 주기부터, 오늘 이후만
+    # first 를 반복 주기에 맞춘다 (매주 반복이면 마감일과 같은 요일)
+    offset = (first - due).days % step.days
+    day = first + timedelta(days=(step.days - offset) % step.days)
+    while day <= end:
+        found.append((day, True))
+        day += step
+    return found
+
+
+def month_range(month: str) -> tuple[date, date]:
+    year, mon = map(int, month.split("-"))
+    start = date(year, mon, 1)
+    following = date(year + mon // 12, mon % 12 + 1, 1)
+    return start, following - timedelta(days=1)
+
+
 def refresh_repeats(conn: sqlite3.Connection, user_id: int) -> None:
     # 완료한 반복 할 일은 주기가 지나면 다시 미완료로 돌아온다 (완료 기록은 completions 에 남아 있다)
     now = today()
@@ -583,6 +637,41 @@ def get_stats(user: CurrentUser) -> Stats:
               for i in reversed(range(STATS_DAYS))]
     return Stats(today=now, streak=streak, recent=recent,
                  recent_total=sum(d.count for d in recent), total=sum(per_day.values()))
+
+
+@app.get("/calendar", responses=UNAUTHORIZED)    # 달력 — 한 달 동안 날짜별 마감 할 일과 완료 횟수
+def get_calendar(
+    user: CurrentUser,
+    month: Annotated[str | None, Query(pattern=r"^\d{4}-(0[1-9]|1[0-2])$",
+                                       description="YYYY-MM, 비우면 이번 달")] = None,
+) -> Calendar:
+    now = today()
+    month = month or now.strftime("%Y-%m")
+    start, end = month_range(month)
+    with transaction() as conn:
+        refresh_repeats(conn, user.id)           # 목록과 같은 상태를 보이도록 반복 초기화를 먼저 한다
+        todos = [from_row(r) for r in conn.execute(
+            "SELECT * FROM todos WHERE user_id = ? AND due_date IS NOT NULL ORDER BY id", (user.id,))]
+        done_rows = conn.execute(
+            """SELECT completed_on, COUNT(*) FROM completions
+               WHERE user_id = ? AND completed_on BETWEEN ? AND ? GROUP BY completed_on""",
+            (user.id, start.isoformat(), end.isoformat())).fetchall()
+    done_per_day = {date.fromisoformat(day): count for day, count in done_rows}
+
+    items: dict[date, list[CalendarItem]] = {}
+    for todo in todos:
+        for day, projected in occurrences(todo, start, end, now):
+            items.setdefault(day, []).append(CalendarItem(
+                id=todo.id, title=todo.title, repeat=todo.repeat, projected=projected,
+                completed=todo.completed and not projected,   # 다음 주기는 아직 하지 않은 일
+                overdue=not projected and not todo.completed and day < now,
+            ))
+    for day_items in items.values():                # 칸에 몇 개만 보이므로 실제 마감을 반복 예정보다 앞에
+        day_items.sort(key=lambda item: (item.projected, item.id))
+    days = [CalendarDay(date=start + timedelta(days=i), items=items.get(start + timedelta(days=i), []),
+                        completed=done_per_day.get(start + timedelta(days=i), 0))
+            for i in range((end - start).days + 1)]
+    return Calendar(month=month, today=now, days=days)
 
 
 @app.get("/version")                             # 화면 배지가 읽어가는 앱 버전 (로그인 없이 볼 수 있다)

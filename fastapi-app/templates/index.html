@@ -328,6 +328,78 @@
             background: #fdecef; color: var(--danger); border: 1px solid #f7ccd5; border-radius: 10px;
             padding: .5rem .7rem; font-size: .85rem; margin: .9rem 0 0;
         }
+
+        /* 목록 · 달력 전환 탭 */
+        .view-switch {
+            display: inline-flex; gap: .2rem; margin-bottom: 1rem; padding: .2rem;
+            background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+        }
+        .view-switch button {
+            padding: .35rem 1rem; font-size: .85rem; font-weight: 600;
+            background: transparent; color: var(--muted);
+        }
+        .view-switch button:hover { color: var(--accent); }
+        .view-switch button[aria-selected="true"] { background: var(--accent); color: #fff; }
+        .calendar-view .list-only { display: none; }
+
+        /* 월간 달력 */
+        .calendar[hidden] { display: none; }
+        .calendar {
+            background: var(--surface); border: 1px solid var(--line);
+            border-radius: var(--radius); box-shadow: var(--shadow); padding: .8rem;
+        }
+        .cal-head { display: flex; align-items: center; gap: .35rem; margin-bottom: .6rem; }
+        .cal-title { font-size: 1.05rem; font-weight: 700; margin: 0 auto 0 .2rem; letter-spacing: -.01em; }
+        .cal-head button {
+            padding: .3rem .65rem; font-size: .82rem;
+            background: transparent; color: var(--muted); border-color: var(--line);
+        }
+        .cal-head button:hover { background: var(--accent-soft); color: var(--accent); border-color: #d7dbff; }
+        .cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; }
+        .cal-weekday { font-size: .72rem; font-weight: 600; color: var(--muted); text-align: center; padding: .2rem 0; }
+        .cal-weekday.sun { color: var(--danger); }
+        .cal-weekday.sat { color: var(--accent); }
+        .cal-cell {
+            min-height: 5.2rem; min-width: 0; padding: .25rem; border-radius: 8px;
+            background: var(--bg); cursor: pointer; display: flex; flex-direction: column; gap: 2px;
+            transition: background .15s, box-shadow .15s;
+        }
+        .cal-cell:hover { background: var(--accent-soft); }
+        .cal-cell.blank { background: transparent; cursor: default; }
+        .cal-cell.today { box-shadow: inset 0 0 0 2px var(--accent); }
+        .cal-top { display: flex; align-items: center; justify-content: space-between; gap: 2px; }
+        .cal-date {
+            padding: 0 .25rem; font-size: .78rem; font-weight: 600; line-height: 1.5;
+            background: none; color: var(--text); border-radius: 6px;
+        }
+        .cal-date:hover { background: var(--surface); color: var(--accent); }
+        .cal-cell.sun .cal-date { color: var(--danger); }
+        .cal-cell.sat .cal-date { color: var(--accent); }
+        .cal-cell.today .cal-date { background: var(--accent); color: #fff; }
+        .cal-done {
+            font-size: .64rem; font-weight: 700; line-height: 1.5; padding: 0 .3rem; border-radius: 99px;
+            color: #067647; background: #ecfdf3; border: 1px solid #bfeccf; white-space: nowrap;
+        }
+        .cal-item {
+            display: block; width: 100%; min-width: 0; text-align: left;
+            font-size: .68rem; font-weight: 600; line-height: 1.45; padding: 0 .3rem; border-radius: 5px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            color: var(--accent); background: var(--accent-soft); border: 1px solid #d7dbff;
+        }
+        .cal-item:hover { border-color: var(--accent); }
+        .cal-item.overdue { color: var(--danger); background: #fdecef; border-color: #f7ccd5; }
+        .cal-item.done { color: var(--muted); background: var(--surface); border-color: var(--line); text-decoration: line-through; }
+        .cal-item.projected { color: var(--muted); background: transparent; border-style: dashed; border-color: #c9ccdb; }
+        .cal-more { font-size: .66rem; color: var(--muted); padding: 0 .3rem; }
+        .cal-legend { display: flex; flex-wrap: wrap; gap: .3rem .7rem; margin-top: .7rem; font-size: .72rem; color: var(--muted); }
+        .cal-legend span { display: inline-flex; align-items: center; gap: .3rem; }
+        .cal-legend .cal-item, .cal-legend .cal-done { width: auto; pointer-events: none; }
+        .cal-hint { font-size: .75rem; color: var(--muted); margin: .4rem 0 0; }
+        @media (max-width: 480px) {
+            .cal-cell { min-height: 3.6rem; padding: .15rem; }
+            .cal-item { font-size: .6rem; padding: 0 .15rem; }
+            .cal-done { font-size: .58rem; padding: 0 .2rem; }
+        }
     </style>
 </head>
 <body>
@@ -379,11 +451,16 @@
         </div>
     </section>
 
-    <div class="search-row">
+    <div class="view-switch" id="view-switch" role="tablist" aria-label="보기 방식">
+        <button type="button" role="tab" data-view="list" aria-selected="true">목록</button>
+        <button type="button" role="tab" data-view="calendar" aria-selected="false">달력</button>
+    </div>
+
+    <div class="search-row list-only">
         <input type="search" id="search" placeholder="검색 (제목 · 설명 · 하위 작업 · 태그)" aria-label="검색">
     </div>
 
-    <div class="toolbar">
+    <div class="toolbar list-only">
         <div class="filters" id="filters">
             <button type="button" class="on" data-filter="all">전체</button>
             <button type="button" data-filter="active">미완료</button>
@@ -397,7 +474,7 @@
             </select>
         </label>
     </div>
-    <div class="tag-filter" id="tag-filter" hidden></div>
+    <div class="tag-filter list-only" id="tag-filter" hidden></div>
 
     <form id="todo-form">
         <label class="sr-only" for="title">제목</label>
@@ -420,7 +497,25 @@
         <button type="submit">추가</button>
     </form>
     <p id="error" role="alert" hidden></p>
-    <ul id="todo-list"></ul>
+    <ul id="todo-list" class="list-only"></ul>
+
+    <section class="calendar" id="calendar" hidden aria-labelledby="cal-title">
+        <div class="cal-head">
+            <h2 class="cal-title" id="cal-title" aria-live="polite">달력</h2>
+            <button type="button" id="cal-prev" aria-label="이전 달">‹</button>
+            <button type="button" id="cal-today">오늘</button>
+            <button type="button" id="cal-next" aria-label="다음 달">›</button>
+        </div>
+        <div class="cal-grid" id="cal-grid"></div>
+        <div class="cal-legend" aria-hidden="true">
+            <span><span class="cal-item">할 일</span> 마감</span>
+            <span><span class="cal-item overdue">할 일</span> 지난 마감</span>
+            <span><span class="cal-item done">할 일</span> 완료</span>
+            <span><span class="cal-item projected">↻ 할 일</span> 반복 예정</span>
+            <span><span class="cal-done">✓2</span> 그날 완료한 횟수</span>
+        </div>
+        <p class="cal-hint">날짜를 누르면 그 날짜를 마감일로 할 일을 추가하고, 할 일을 누르면 수정할 수 있어요.</p>
+    </section>
     </main>
 
     <script>
@@ -433,6 +528,8 @@
         let sortBy = "created";    // created | due | progress
         let query = "";            // 검색어 (제목·설명·하위 작업·태그)
         let activeTag = "";        // 태그 필터 — 빈 문자열이면 전체
+        let view = "list";         // list | calendar
+        let calMonth = today().slice(0, 7);   // 달력에 보이는 달 "YYYY-MM"
 
         const MAX_SUBTASKS = 20;   // main.py 의 MAX_SUBTASKS 와 같게
         const MAX_TAGS = 5;        // main.py 의 MAX_TAGS 와 같게
@@ -541,6 +638,7 @@
           todos = await api("/todos");
           render();
           renderStats(await api("/stats"));
+          if (view === "calendar") renderCalendar(await api(`/calendar?month=${calMonth}`));
         });
 
         // 저장 요청은 보낸 순서대로 하나씩 보내고, 화면은 응답을 기다리지 않고 먼저 바꾼다.
@@ -868,6 +966,114 @@
           if (typingSubFor) listEl.querySelector(`.sub-add[data-todo-id="${typingSubFor}"]`)?.focus();
         }
 
+        // ---------- 달력 ----------
+        const MAX_CAL_ITEMS = 3;                 // 칸이 작아서 3개까지만 보이고 나머지는 "+n"
+
+        function shiftMonth(month, delta) {
+          const [y, m] = month.split("-").map(Number);
+          const d = new Date(y, m - 1 + delta, 1);
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+        }
+
+        const loadCalendar = () => run("달력 불러오기", async () => {
+          renderCalendar(await api(`/calendar?month=${calMonth}`));
+        });
+
+        function calendarItem(item) {
+          let state = "";
+          if (item.projected) state = " projected";
+          else if (item.completed) state = " done";
+          else if (item.overdue) state = " overdue";
+          const label = item.projected ? `↻ ${item.title}` : item.title;
+          const status = { " projected": "반복 예정", " done": "완료", " overdue": "마감 지남", "": "마감" }[state];
+          const chip = button(label, `cal-item${state}`, () => openTodo(item.id));
+          chip.title = `${item.title} (${status}) — 눌러서 수정`;
+          return chip;
+        }
+
+        function calendarCell(day, isToday) {
+          const [, m, d] = day.date.split("-").map(Number);
+          const weekday = new Date(day.date + "T00:00:00").getDay();
+          let className = "cal-cell";
+          if (weekday === 0) className += " sun";
+          if (weekday === 6) className += " sat";
+          if (isToday) className += " today";
+          const cell = el("div", className);
+
+          const top = el("div", "cal-top");
+          const dateButton = button(String(d), "cal-date", () => pickDate(day.date));
+          dateButton.setAttribute("aria-label", `${m}월 ${d}일 — 이 날짜로 할 일 추가 (할 일 ${day.items.length}개, 완료 ${day.completed}번)`);
+          top.append(dateButton);
+          if (day.completed) {
+            const done = el("span", "cal-done", `✓${day.completed}`);
+            done.title = `이날 ${day.completed}번 완료`;
+            top.append(done);
+          }
+          cell.append(top, ...day.items.slice(0, MAX_CAL_ITEMS).map(calendarItem));
+          if (day.items.length > MAX_CAL_ITEMS) {
+            const more = el("span", "cal-more", `+${day.items.length - MAX_CAL_ITEMS}`);
+            more.title = day.items.slice(MAX_CAL_ITEMS).map((i) => i.title).join(", ");
+            cell.append(more);
+          }
+          // 칸의 빈 곳을 눌러도 날짜를 고른 것으로 (할 일 버튼은 제외)
+          cell.onclick = (event) => { if (!event.target.closest("button")) pickDate(day.date); };
+          return cell;
+        }
+
+        function renderCalendar(cal) {
+          const [y, m] = cal.month.split("-").map(Number);
+          $("cal-title").textContent = `${y}년 ${m}월`;
+          const weekdays = WEEKDAYS.map((name, i) => {
+            let className = "cal-weekday";
+            if (i === 0) className += " sun";
+            if (i === 6) className += " sat";
+            return el("div", className, name);
+          });
+          const leading = new Date(y, m - 1, 1).getDay();   // 1일 앞의 빈칸 (일요일 시작)
+          const blanks = Array.from({ length: leading }, () => el("div", "cal-cell blank"));
+          const cells = cal.days.map((day) => calendarCell(day, day.date === cal.today));
+          $("cal-grid").replaceChildren(...weekdays, ...blanks, ...cells);
+        }
+
+        // 날짜 고르기 → 위의 추가 폼에 마감일을 채우고 제목에 커서
+        function pickDate(date) {
+          $("due-date").value = date;
+          $("title").focus();
+          $("todo-form").scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+
+        // 달력의 할 일 → 목록 보기로 가서 그 할 일을 편집 상태로 연다
+        function openTodo(id) {
+          filter = "all";
+          query = "";
+          activeTag = "";
+          $("search").value = "";
+          [...$("filters").children].forEach((b) => b.classList.toggle("on", b.dataset.filter === "all"));
+          editingId = id;
+          setView("list");
+          render();
+          listEl.querySelector("li.editing")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+
+        function setView(next) {
+          view = next;
+          $("app").classList.toggle("calendar-view", view === "calendar");
+          $("calendar").hidden = view !== "calendar";
+          for (const tab of $("view-switch").children) tab.setAttribute("aria-selected", String(tab.dataset.view === view));
+          if (view === "calendar") {
+            editingId = null;
+            loadCalendar();
+          }
+        }
+
+        $("view-switch").onclick = (event) => {
+          const tab = event.target.closest("button[data-view]");
+          if (tab && tab.dataset.view !== view) setView(tab.dataset.view);
+        };
+        $("cal-prev").onclick = () => { calMonth = shiftMonth(calMonth, -1); loadCalendar(); };
+        $("cal-next").onclick = () => { calMonth = shiftMonth(calMonth, 1); loadCalendar(); };
+        $("cal-today").onclick = () => { calMonth = today().slice(0, 7); loadCalendar(); };
+
         function remove(id) {
           if (!confirm("정말 삭제할까요?")) return;
           run("삭제", async () => { await api(`/todos/${id}`, "DELETE"); await load(); });
@@ -940,6 +1146,11 @@
           activeTag = "";
           $("search").value = "";
           listEl.replaceChildren();
+          view = "list";                         // 다음 사람은 목록 보기 · 이번 달부터
+          calMonth = today().slice(0, 7);
+          $("app").classList.remove("calendar-view");
+          $("calendar").hidden = true;
+          for (const tab of $("view-switch").children) tab.setAttribute("aria-selected", String(tab.dataset.view === "list"));
           errorEl.hidden = true;
           $("app").hidden = true;
           $("account").hidden = true;
