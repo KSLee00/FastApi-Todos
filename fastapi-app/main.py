@@ -5,6 +5,7 @@ import math
 import os
 import secrets
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import asynccontextmanager, closing, contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -47,9 +48,11 @@ STATS_DAYS = 7                                   # 통계 막대에 보여 줄 �
 
 SESSION_COOKIE = "todo_session"
 LOGIN_REQUIRED = "로그인이 필요합니다."
+LOGIN_FAILED = "아이디 또는 비밀번호가 올바르지 않습니다."
 SESSION_DAYS = 7
 MAX_FAILED_LOGINS = 5                            # 연속으로 틀리면
 LOCK_MINUTES = 5                                 # 이만큼 로그인을 막는다
+LOGIN_LOCKED = f"로그인 시도가 너무 많습니다. {LOCK_MINUTES}분 뒤 다시 시도해 주세요."
 SCRYPT_N = 2 ** 15                               # 비밀번호 해시 비용 (테스트에서는 낮춰서 빠르게 돌린다)
 
 
@@ -214,15 +217,35 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     """)
 
 
+_ready_dbs: set[str] = set()                     # 스키마 준비를 마친 DB 파일 — 요청마다 다시 하지 않는다
+_ready_lock = threading.Lock()
+
+
+def prepare_db(conn: sqlite3.Connection) -> None:
+    # DB 파일마다 처음 한 번만: 테이블·열 준비 + WAL 모드
+    # WAL: 쓰는 동안에도 다른 요청이 마지막으로 저장된 상태를 읽을 수 있다 (읽기와 쓰기가 서로 막지 않는다)
+    key = str(DB_FILE)
+    if key in _ready_dbs:
+        return
+    with _ready_lock:
+        if key not in _ready_dbs:
+            ensure_schema(conn)
+            conn.execute("PRAGMA journal_mode=WAL")
+            _ready_dbs.add(key)
+
+
 @contextmanager
-def transaction() -> Iterator[sqlite3.Connection]:
-    # BEGIN IMMEDIATE: 읽기 → 판단 → 쓰기 전체를 한 번에 하나의 요청만 하게 한다.
-    # 파일 하나를 여러 프로세스가 같이 써도 SQLite 가 잠가 주므로 --workers 를 늘려도 안전하다.
+def transaction(write: bool = True) -> Iterator[sqlite3.Connection]:
+    # write=True  → BEGIN IMMEDIATE: 읽기 → 판단 → 쓰기 전체를 한 번에 하나의 요청만 하게 한다.
+    #               파일 하나를 여러 프로세스가 같이 써도 SQLite 가 잠가 주므로 --workers 를 늘려도 안전하다.
+    # write=False → BEGIN: 읽기만 한다. 쓰기 잠금을 잡지 않아 다른 요청을 기다리게 하지 않는다.
+    # 쓰기 잠금은 짧게 잡아야 한다 — 비밀번호 해시처럼 오래 걸리는 계산은 트랜잭션 밖에서 한다.
+    #   (v7.0.0 부하 테스트에서 잠금을 잡은 채 해시를 계산해 "database is locked" 500 오류가 났다)
     DB_FILE.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(DB_FILE, timeout=10, isolation_level=None)) as conn:
         conn.row_factory = sqlite3.Row
-        ensure_schema(conn)
-        conn.execute("BEGIN IMMEDIATE")
+        prepare_db(conn)
+        conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         try:
             yield conn
         except Exception:                        # 404 등 예외가 나면 하던 변경을 모두 되돌린다
@@ -271,7 +294,7 @@ def fetch(conn: sqlite3.Connection, todo_id: int, user_id: int) -> TodoItem:
 
 
 def load_todos(user_id: int | None = None) -> list[TodoItem]:
-    with transaction() as conn:
+    with transaction(write=False) as conn:
         if user_id is None:
             rows = conn.execute("SELECT * FROM todos ORDER BY id")
         else:
@@ -352,7 +375,7 @@ def claim_legacy(conn: sqlite3.Connection, user: User) -> None:
 def current_user(token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> User:
     if not token:
         raise HTTPException(401, LOGIN_REQUIRED)
-    with transaction() as conn:
+    with transaction(write=False) as conn:      # 모든 요청마다 거치는 곳이라 쓰기 잠금을 잡지 않는다
         row = conn.execute(
             """SELECT users.id, users.username FROM sessions JOIN users ON users.id = sessions.user_id
                WHERE sessions.token_hash = ? AND sessions.expires_at > ?""",
@@ -516,11 +539,12 @@ async def add_security_headers(request: Request, call_next):
 
 @app.post("/auth/signup", status_code=201, responses={409: {"description": "이미 있는 아이디"}})
 def signup(payload: SignupIn, response: Response) -> User:
+    password_hash = hash_password(payload.password)   # 오래 걸리는 계산은 잠금을 잡기 전에
     with transaction() as conn:
         if conn.execute("SELECT 1 FROM users WHERE username = ?", (payload.username,)).fetchone():
             raise HTTPException(409, "이미 사용 중인 아이디입니다.")
         cursor = conn.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                              (payload.username, hash_password(payload.password), utcnow().isoformat()))
+                              (payload.username, password_hash, utcnow().isoformat()))
         user = User(id=cursor.lastrowid, username=payload.username)
         claim_legacy(conn, user)
         start_session(conn, user.id, response)
@@ -532,17 +556,27 @@ def signup(payload: SignupIn, response: Response) -> User:
     429: {"description": "로그인 시도 제한"},
 })
 def login(payload: LoginIn, response: Response) -> User:
+    # 1) 읽기만 해서 계정을 찾고  2) 잠금 없이 비밀번호를 검사한 뒤  3) 결과를 짧은 쓰기 트랜잭션으로 저장한다
     # 실패 횟수는 저장해야 하므로 트랜잭션을 끝낸(COMMIT) 뒤에 오류를 돌려준다
     now = utcnow()
-    with transaction() as conn:
+    with transaction(write=False) as conn:
         row = conn.execute("SELECT * FROM users WHERE username = ?", (payload.username.strip(),)).fetchone()
-        if row is None:
-            hash_password(payload.password)      # 없는 아이디도 같은 시간을 써서 아이디가 있는지 응답 시간으로 알 수 없게
+    if row is None:
+        hash_password(payload.password)          # 없는 아이디도 같은 시간을 써서 아이디가 있는지 응답 시간으로 알 수 없게
+        raise HTTPException(401, LOGIN_FAILED)
+    if row["locked_until"] and row["locked_until"] > now.isoformat():
+        raise HTTPException(429, LOGIN_LOCKED)
+    password_ok = verify_password(payload.password, row["password_hash"])
+
+    with transaction() as conn:
+        # 검사하는 사이 다른 요청이 실패 횟수를 바꿨을 수 있으니 최신 값을 다시 읽는다
+        current = conn.execute("SELECT failed_logins, locked_until FROM users WHERE id = ?", (row["id"],)).fetchone()
+        if current is None:                      # 그 사이 계정이 삭제됨
             outcome = "fail"
-        elif row["locked_until"] and row["locked_until"] > now.isoformat():
+        elif current["locked_until"] and current["locked_until"] > now.isoformat():
             outcome = "locked"
-        elif not verify_password(payload.password, row["password_hash"]):
-            failed = row["failed_logins"] + 1
+        elif not password_ok:
+            failed = current["failed_logins"] + 1
             locked_until = (now + timedelta(minutes=LOCK_MINUTES)).isoformat() if failed >= MAX_FAILED_LOGINS else None
             conn.execute("UPDATE users SET failed_logins = ?, locked_until = ? WHERE id = ?",
                          (0 if locked_until else failed, locked_until, row["id"]))
@@ -554,9 +588,9 @@ def login(payload: LoginIn, response: Response) -> User:
             start_session(conn, user.id, response)
             outcome = "ok"
     if outcome == "locked":
-        raise HTTPException(429, f"로그인 시도가 너무 많습니다. {LOCK_MINUTES}분 뒤 다시 시도해 주세요.")
+        raise HTTPException(429, LOGIN_LOCKED)
     if outcome == "fail":
-        raise HTTPException(401, "아이디 또는 비밀번호가 올바르지 않습니다.")
+        raise HTTPException(401, LOGIN_FAILED)
     return user
 
 
@@ -621,7 +655,7 @@ def delete_todo(user: CurrentUser, todo_id: int) -> None:
 @app.get("/stats", responses=UNAUTHORIZED)       # 학습 통계 — 연속 완료일과 최근 7일 완료 개수
 def get_stats(user: CurrentUser) -> Stats:
     now = today()
-    with transaction() as conn:
+    with transaction(write=False) as conn:
         rows = conn.execute("""SELECT completed_on, COUNT(*) FROM completions
                                WHERE user_id = ? GROUP BY completed_on""", (user.id,)).fetchall()
     per_day = {date.fromisoformat(day): count for day, count in rows}

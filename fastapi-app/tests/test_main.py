@@ -770,3 +770,59 @@ def test_calendar_lists_real_due_before_projection(clock):
     create(title="매일 반복", repeat="daily", due_date="2026-10-07")
     create(title="20일 마감", due_date="2026-10-20")
     assert day_items(calendar(), "2026-10-20") == [("20일 마감", False), ("매일 반복", True)]
+
+
+# ---------- 동시 요청 · DB 잠금 (v7 부하 테스트에서 찾은 문제) ----------
+
+def write_lock_is_free():
+    # 다른 연결에서 바로(timeout=0) 쓰기 잠금을 잡아 본다 — 잡히면 아무도 잠금을 쥐고 있지 않은 것
+    with closing(sqlite3.connect(main.DB_FILE, timeout=0, isolation_level=None)) as other:
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            other.execute("ROLLBACK")
+            return True
+        except sqlite3.OperationalError:
+            return False
+
+
+def test_signup_hashes_password_outside_db_lock(monkeypatch):
+    seen = []
+    real = main.hash_password
+
+    def spy(password):
+        seen.append(write_lock_is_free())
+        return real(password)
+
+    monkeypatch.setattr(main, "hash_password", spy)
+    assert TestClient(app).post("/auth/signup", json={"username": "alice", "password": "password123"}).status_code == 201
+    assert seen == [True]                        # 해시를 계산하는 동안 다른 요청이 DB 에 쓸 수 있다
+
+
+def test_login_verifies_password_outside_db_lock(monkeypatch):
+    seen = []
+    real = main.verify_password
+
+    def spy(password, stored):
+        seen.append(write_lock_is_free())
+        return real(password, stored)
+
+    monkeypatch.setattr(main, "verify_password", spy)
+    assert TestClient(app).post("/auth/login", json=TESTER).status_code == 200
+    assert seen == [True]
+
+
+def test_reads_are_not_blocked_by_a_writer():
+    # 다른 요청이 쓰기 잠금을 쥐고 있어도, 로그인 확인·통계 조회는 기다리지 않고 바로 응답한다 (WAL)
+    with closing(sqlite3.connect(main.DB_FILE, isolation_level=None)) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("INSERT INTO completions (user_id, todo_id, title, completed_on) VALUES (1, 0, 'x', '2026-10-07')")
+        started = datetime.now()
+        assert client.get("/auth/me").status_code == 200
+        assert client.get("/stats").json()["total"] == 0      # 아직 COMMIT 전이라 보이지 않는다
+        assert (datetime.now() - started).total_seconds() < 2  # 잠금을 기다렸다면 10초 뒤 실패했다
+        writer.execute("ROLLBACK")
+
+
+def test_database_uses_wal_mode():
+    with closing(sqlite3.connect(main.DB_FILE)) as db:
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
