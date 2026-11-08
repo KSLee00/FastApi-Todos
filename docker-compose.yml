@@ -135,9 +135,12 @@ services:
       - -JTARGET_HOST=fastapi-app               # 같은 compose 안이라 서비스 이름과 컨테이너 내부 포트로 접속
       - -JTARGET_PORT=8000
       - -JINFLUX_URL=http://influxdb:8086/write?db=jmeter
-      - -JTHREADS=20                            # 사용자 20명이
-      - -JRAMP=30                               # 30초에 걸쳐 들어와서
-      - -JLOOPS=5                               # 각자 5번씩 (가입 → 할 일 추가 → 조회 → 달력 → 탈퇴)
+      # 사용자 수 · 램프업(초) · 반복 횟수 — 실행할 때 바꿀 수 있다
+      #   JM_THREADS=30 JM_RAMP=10 JM_LOOPS=10 docker compose run --rm jmeter
+      # 램프업이 길면 앞사람이 끝난 뒤 다음 사람이 들어와 동시 사용자가 1명뿐이 된다 → 짧게 둔다
+      - -JTHREADS=${JM_THREADS:-30}             # 사용자 30명이
+      - -JRAMP=${JM_RAMP:-10}                   # 10초 안에 모두 들어와서
+      - -JLOOPS=${JM_LOOPS:-10}                 # 각자 10번씩 (가입 → 할 일 추가 → 조회 → 달력 → 탈퇴)
     # networks 없음: 같은 compose 의 서비스는 기본 네트워크로 서로 통신한다
     # (정의하지 않은 loadtest-net 을 적으면 docker compose 명령 전체가 오류로 멈춘다)
 
