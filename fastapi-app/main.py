@@ -8,7 +8,7 @@ import sqlite3
 import threading
 from collections.abc import Iterator
 from contextlib import asynccontextmanager, closing, contextmanager
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-APP_VERSION = "7.0.0"                            # 화면 배지와 /version 이 함께 쓰는 단일 출처
+APP_VERSION = "8.0.0"                            # 화면 배지와 /version 이 함께 쓰는 단일 출처
 ENCODING = "utf-8"
 
 BASE_DIR = Path(__file__).resolve().parent       # main.py 가 있는 폴더
@@ -45,6 +45,8 @@ ENABLE_DOCS = os.environ.get("ENABLE_DOCS", "0") == "1"
 MAX_SUBTASKS = 20
 MAX_TAGS = 5
 STATS_DAYS = 7                                   # 통계 막대에 보여 줄 최근 일수
+POMODORO_SECONDS = 25 * 60                       # 포모도로 한 번 = 25분 집중
+MAX_FOCUS_SECONDS = 4 * 3600                     # 자유 모드에서 정지를 잊어도 4시간까지만 센다
 
 SESSION_COOKIE = "todo_session"
 LOGIN_REQUIRED = "로그인이 필요합니다."
@@ -110,11 +112,13 @@ class TodoIn(BaseModel):                         # 클라이언트가 보내는 
 class TodoItem(TodoIn):                          # 서버가 돌려주는 데이터 (id 있음)
     id: int
     completed_on: date | None = None             # 마지막으로 완료한 날 — 반복 초기화에 쓴다 (클라이언트가 보내도 무시)
+    study_seconds: int = 0                       # 이 할 일에 집중한 시간 합계 (서버가 계산, 클라이언트가 보내도 무시)
 
 
 class DayCount(BaseModel):
     date: date
     count: int
+    study_seconds: int = 0                       # 그날 집중한 시간 (초)
 
 
 class Stats(BaseModel):
@@ -123,6 +127,30 @@ class Stats(BaseModel):
     recent: list[DayCount]                       # 최근 STATS_DAYS 일의 날짜별 완료 개수 (오래된 날 → 오늘)
     recent_total: int
     total: int                                   # 지금까지 완료한 횟수
+    study_today_seconds: int = 0                 # 오늘 집중한 시간
+    study_recent_seconds: int = 0                # 최근 STATS_DAYS 일 동안 집중한 시간
+    study_total_seconds: int = 0                 # 지금까지 집중한 시간
+
+
+TimerMode = Literal["pomodoro", "free"]
+
+
+class TimerStart(BaseModel):
+    mode: TimerMode = "pomodoro"                 # pomodoro: 25분 뒤 자동으로 끝남 / free: 직접 정지 (최대 4시간)
+
+
+class Timer(BaseModel):                          # 지금 돌아가는 집중 타이머 (사용자마다 하나)
+    running: bool
+    todo_id: int | None = None
+    title: str | None = None
+    mode: TimerMode | None = None
+    started_at: datetime | None = None
+    planned_seconds: int | None = None           # 이 시간이 지나면 저절로 끝난다
+    elapsed_seconds: int = 0
+
+
+class TimerStopped(BaseModel):
+    recorded_seconds: int                        # 이번에 기록된 집중 시간
 
 
 class CalendarItem(BaseModel):                   # 달력 칸에 표시할 할 일 하나
@@ -138,6 +166,7 @@ class CalendarDay(BaseModel):
     date: date
     items: list[CalendarItem]
     completed: int                               # 그날 완료한 횟수 (학습 통계와 같은 기록)
+    study_seconds: int = 0                       # 그날 집중한 시간 (초)
 
 
 class Calendar(BaseModel):
@@ -198,6 +227,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id    INTEGER NOT NULL,
     expires_at TEXT    NOT NULL
 );
+-- 집중 타이머 기록: 할 일을 지워도 공부 시간 통계는 남는다
+CREATE TABLE IF NOT EXISTS study_logs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL,
+    todo_id         INTEGER NOT NULL,
+    title           TEXT    NOT NULL,
+    mode            TEXT    NOT NULL,
+    started_at      TEXT    NOT NULL,                  -- UTC
+    planned_seconds INTEGER NOT NULL,                  -- 이 시간이 지나면 그 시각에 끝난 것으로 본다
+    ended_at        TEXT                               -- NULL = 실행 중
+);
 """
 
 COLUMNS = ("title", "description", "completed", "due_date", "progress",
@@ -214,6 +254,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript("""
         CREATE INDEX IF NOT EXISTS todos_by_user ON todos (user_id);
         CREATE INDEX IF NOT EXISTS completions_by_user_day ON completions (user_id, completed_on);
+        CREATE INDEX IF NOT EXISTS study_logs_by_user ON study_logs (user_id, ended_at);
     """)
 
 
@@ -481,6 +522,74 @@ def record_completion_change(conn: sqlite3.Connection, user_id: int,
     return new.model_copy(update={"completed_on": old.completed_on if old else None})
 
 
+# ---------- 집중 타이머 ----------
+
+def log_end(row: sqlite3.Row, now: datetime) -> datetime:
+    # 기록이 끝난 시각 — 실행 중이면 지금, 예정 시간(25분·4시간)을 넘겼으면 예정 시각까지만 센다
+    started = datetime.fromisoformat(row["started_at"])
+    limit = started + timedelta(seconds=row["planned_seconds"])
+    ended = datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else now
+    return max(started, min(ended, limit))
+
+
+def log_seconds(row: sqlite3.Row, now: datetime) -> int:
+    return int((log_end(row, now) - datetime.fromisoformat(row["started_at"])).total_seconds())
+
+
+def close_finished_timer(conn: sqlite3.Connection, user_id: int, now: datetime) -> None:
+    # 예정 시간이 지난 타이머는 예정 시각에 끝난 것으로 기록한다 (포모도로 25분 자동 종료, 정지를 잊은 자유 모드)
+    rows = conn.execute("SELECT * FROM study_logs WHERE user_id = ? AND ended_at IS NULL", (user_id,)).fetchall()
+    for row in rows:
+        limit = datetime.fromisoformat(row["started_at"]) + timedelta(seconds=row["planned_seconds"])
+        if now >= limit:
+            conn.execute("UPDATE study_logs SET ended_at = ? WHERE id = ?", (limit.isoformat(), row["id"]))
+
+
+def running_timer(conn: sqlite3.Connection, user_id: int, now: datetime) -> Timer:
+    row = conn.execute("SELECT * FROM study_logs WHERE user_id = ? AND ended_at IS NULL", (user_id,)).fetchone()
+    if row is None:
+        return Timer(running=False)
+    return Timer(running=True, todo_id=row["todo_id"], title=row["title"], mode=row["mode"],
+                 started_at=datetime.fromisoformat(row["started_at"]),
+                 planned_seconds=row["planned_seconds"], elapsed_seconds=log_seconds(row, now))
+
+
+def stop_running(conn: sqlite3.Connection, user_id: int, now: datetime) -> int:
+    # 실행 중인 타이머를 지금 멈추고 기록된 시간(초)을 돌려준다 — 없으면 0
+    row = conn.execute("SELECT * FROM study_logs WHERE user_id = ? AND ended_at IS NULL", (user_id,)).fetchone()
+    if row is None:
+        return 0
+    conn.execute("UPDATE study_logs SET ended_at = ? WHERE id = ?", (log_end(row, now).isoformat(), row["id"]))
+    return log_seconds(row, now)
+
+
+def split_by_day(start: datetime, end: datetime) -> dict[date, int]:
+    # 자정을 넘긴 기록은 날짜별로 나눠 센다 (날짜는 APP_TZ 기준 — 한국 시간 자정)
+    result: dict[date, int] = {}
+    current, end = start.astimezone(APP_TZ), end.astimezone(APP_TZ)
+    while current < end:
+        midnight = datetime.combine(current.date() + timedelta(days=1), time.min, tzinfo=APP_TZ)
+        piece_end = min(end, midnight)
+        result[current.date()] = result.get(current.date(), 0) + int((piece_end - current).total_seconds())
+        current = piece_end
+    return result
+
+
+def study_by_day(conn: sqlite3.Connection, user_id: int, now: datetime) -> dict[date, int]:
+    total: dict[date, int] = {}
+    for row in conn.execute("SELECT * FROM study_logs WHERE user_id = ?", (user_id,)).fetchall():
+        for day, seconds in split_by_day(datetime.fromisoformat(row["started_at"]), log_end(row, now)).items():
+            total[day] = total.get(day, 0) + seconds
+    return total
+
+
+def study_by_todo(conn: sqlite3.Connection, user_id: int, now: datetime) -> dict[int, int]:
+    total: dict[int, int] = {}
+    for row in conn.execute("SELECT * FROM study_logs WHERE user_id = ?", (user_id,)).fetchall():
+        total[row["todo_id"]] = total.get(row["todo_id"], 0) + log_seconds(row, now)
+    return total
+
+
 # ---------- 검색 ----------
 
 def matches(todo: TodoItem, q: str, tag: str) -> bool:
@@ -610,7 +719,7 @@ def me(user: CurrentUser) -> User:
 @app.delete("/auth/me", status_code=204, responses=UNAUTHORIZED)  # 계정 삭제 — 내 할 일·기록·세션도 모두 지운다
 def delete_account(user: CurrentUser, response: Response) -> None:
     with transaction() as conn:
-        for table in ("todos", "completions", "sessions"):
+        for table in ("todos", "completions", "sessions", "study_logs"):
             conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (user.id,))
         conn.execute("DELETE FROM users WHERE id = ?", (user.id,))
     response.delete_cookie(SESSION_COOKIE, path="/")
@@ -622,7 +731,9 @@ def get_todos(user: CurrentUser, q: str = "", tag: str = "") -> list[TodoItem]:
         refresh_repeats(conn, user.id)
         rows = conn.execute("SELECT * FROM todos WHERE user_id = ? ORDER BY id", (user.id,))
         todos = [from_row(r) for r in rows]
-    return [t for t in todos if matches(t, q.strip(), tag.strip())]
+        studied = study_by_todo(conn, user.id, utcnow())
+    return [t.model_copy(update={"study_seconds": studied.get(t.id, 0)})
+            for t in todos if matches(t, q.strip(), tag.strip())]
 
 
 @app.post("/todos", status_code=201, responses=UNAUTHORIZED)  # 추가 — id 는 서버가 매긴다
@@ -642,13 +753,17 @@ def update_todo(user: CurrentUser, todo_id: int, payload: TodoIn) -> TodoItem:
         old = fetch(conn, todo_id, user.id)      # 없거나 남의 id 면 여기서 404 (트랜잭션은 ROLLBACK)
         todo = record_completion_change(conn, user.id, old, TodoItem(id=todo_id, **payload.model_dump()))
         write(conn, todo)
-    return todo
+        studied = study_by_todo(conn, user.id, utcnow()).get(todo_id, 0)
+    return todo.model_copy(update={"study_seconds": studied})
 
 
 @app.delete("/todos/{todo_id}", status_code=204, responses=AUTH_REQUIRED)  # 삭제 — 완료 기록(통계)은 남긴다
 def delete_todo(user: CurrentUser, todo_id: int) -> None:
+    now = utcnow()
     with transaction() as conn:
         fetch(conn, todo_id, user.id)
+        if running_timer(conn, user.id, now).todo_id == todo_id:   # 지우는 할 일의 타이머는 지금까지만 기록하고 멈춘다
+            stop_running(conn, user.id, now)
         conn.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
 
 
@@ -658,6 +773,7 @@ def get_stats(user: CurrentUser) -> Stats:
     with transaction(write=False) as conn:
         rows = conn.execute("""SELECT completed_on, COUNT(*) FROM completions
                                WHERE user_id = ? GROUP BY completed_on""", (user.id,)).fetchall()
+        studied = study_by_day(conn, user.id, utcnow())   # 실행 중인 타이머도 지금까지의 시간을 포함
     per_day = {date.fromisoformat(day): count for day, count in rows}
 
     # 오늘 아직 못 했어도 어제까지 이어졌으면 연속 기록은 살아 있다
@@ -667,10 +783,14 @@ def get_stats(user: CurrentUser) -> Stats:
         streak += 1
         day -= timedelta(days=1)
 
-    recent = [DayCount(date=now - timedelta(days=i), count=per_day.get(now - timedelta(days=i), 0))
+    recent = [DayCount(date=now - timedelta(days=i), count=per_day.get(now - timedelta(days=i), 0),
+                       study_seconds=studied.get(now - timedelta(days=i), 0))
               for i in reversed(range(STATS_DAYS))]
     return Stats(today=now, streak=streak, recent=recent,
-                 recent_total=sum(d.count for d in recent), total=sum(per_day.values()))
+                 recent_total=sum(d.count for d in recent), total=sum(per_day.values()),
+                 study_today_seconds=studied.get(now, 0),
+                 study_recent_seconds=sum(d.study_seconds for d in recent),
+                 study_total_seconds=sum(studied.values()))
 
 
 @app.get("/calendar", responses=UNAUTHORIZED)    # 달력 — 한 달 동안 날짜별 마감 할 일과 완료 횟수
@@ -690,6 +810,7 @@ def get_calendar(
             """SELECT completed_on, COUNT(*) FROM completions
                WHERE user_id = ? AND completed_on BETWEEN ? AND ? GROUP BY completed_on""",
             (user.id, start.isoformat(), end.isoformat())).fetchall()
+        studied = study_by_day(conn, user.id, utcnow())
     done_per_day = {date.fromisoformat(day): count for day, count in done_rows}
 
     items: dict[date, list[CalendarItem]] = {}
@@ -703,9 +824,44 @@ def get_calendar(
     for day_items in items.values():                # 칸에 몇 개만 보이므로 실제 마감을 반복 예정보다 앞에
         day_items.sort(key=lambda item: (item.projected, item.id))
     days = [CalendarDay(date=start + timedelta(days=i), items=items.get(start + timedelta(days=i), []),
-                        completed=done_per_day.get(start + timedelta(days=i), 0))
+                        completed=done_per_day.get(start + timedelta(days=i), 0),
+                        study_seconds=studied.get(start + timedelta(days=i), 0))
             for i in range((end - start).days + 1)]
     return Calendar(month=month, today=now, days=days)
+
+
+@app.get("/timer", responses=UNAUTHORIZED)       # 지금 돌아가는 집중 타이머 (새로고침·다른 기기에서도 이어진다)
+def get_timer(user: CurrentUser) -> Timer:
+    now = utcnow()
+    with transaction() as conn:
+        close_finished_timer(conn, user.id, now)
+        return running_timer(conn, user.id, now)
+
+
+@app.post("/todos/{todo_id}/timer", status_code=201, responses=AUTH_REQUIRED)  # 집중 시작
+def start_timer(user: CurrentUser, todo_id: int, payload: TimerStart | None = None) -> Timer:
+    # 타이머는 한 번에 하나 — 다른 할 일의 타이머가 돌고 있으면 지금까지 기록하고 바꾼다
+    mode = payload.mode if payload else "pomodoro"
+    now = utcnow()
+    with transaction() as conn:
+        todo = fetch(conn, todo_id, user.id)     # 없거나 남의 할 일이면 404
+        close_finished_timer(conn, user.id, now)
+        stop_running(conn, user.id, now)
+        conn.execute("""INSERT INTO study_logs (user_id, todo_id, title, mode, started_at, planned_seconds)
+                        VALUES (?, ?, ?, ?, ?, ?)""",
+                     (user.id, todo_id, todo.title, mode, now.isoformat(),
+                      POMODORO_SECONDS if mode == "pomodoro" else MAX_FOCUS_SECONDS))
+        return running_timer(conn, user.id, now)
+
+
+@app.post("/timer/stop", responses={**UNAUTHORIZED, 409: {"description": "실행 중인 타이머가 없음"}})  # 집중 정지
+def stop_timer(user: CurrentUser) -> TimerStopped:
+    now = utcnow()
+    with transaction() as conn:
+        close_finished_timer(conn, user.id, now)
+        if not running_timer(conn, user.id, now).running:
+            raise HTTPException(409, "실행 중인 타이머가 없습니다.")
+        return TimerStopped(recorded_seconds=stop_running(conn, user.id, now))
 
 
 @app.get("/version")                             # 화면 배지가 읽어가는 앱 버전 (로그인 없이 볼 수 있다)

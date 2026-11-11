@@ -143,7 +143,7 @@ def test_delete_todo_not_found():
 
 
 def test_version():
-    assert client.get("/version").json() == {"version": "7.0.0"}
+    assert client.get("/version").json() == {"version": "8.0.0"}
 
 
 # ---------- 진행도 · 하위 작업 (v4~) ----------
@@ -382,7 +382,7 @@ def test_stats_empty(clock):
     assert s["streak"] == 0
     assert s["total"] == 0
     assert len(s["recent"]) == main.STATS_DAYS
-    assert s["recent"][-1] == {"date": TODAY.isoformat(), "count": 0}       # 마지막이 오늘
+    assert s["recent"][-1] == {"date": TODAY.isoformat(), "count": 0, "study_seconds": 0}   # 마지막이 오늘
     assert s["recent"][0]["date"] == (TODAY - timedelta(days=6)).isoformat()
 
 
@@ -462,6 +462,7 @@ def new_user(username, password="password123"):
 @pytest.mark.parametrize("method, url", [
     ("get", "/todos"), ("post", "/todos"), ("put", "/todos/1"), ("delete", "/todos/1"),
     ("get", "/stats"), ("get", "/calendar"), ("get", "/auth/me"), ("delete", "/auth/me"),
+    ("get", "/timer"), ("post", "/todos/1/timer"), ("post", "/timer/stop"),
 ])
 def test_requires_login(method, url):
     anonymous = TestClient(app)
@@ -826,3 +827,155 @@ def test_reads_are_not_blocked_by_a_writer():
 def test_database_uses_wal_mode():
     with closing(sqlite3.connect(main.DB_FILE)) as db:
         assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+# ---------- 집중 타이머 (v8~) ----------
+
+@pytest.fixture
+def focus(monkeypatch):
+    # 날짜(today)와 시각(utcnow)을 함께 움직이는 시계 — 2026-10-07 12:00 UTC = 21:00 한국 시간
+    class Clock:
+        now = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+
+        def advance(self, **delta):
+            self.now += timedelta(**delta)
+
+    c = Clock()
+    monkeypatch.setattr(main, "utcnow", lambda: c.now)
+    monkeypatch.setattr(main, "today", lambda: c.now.astimezone(main.APP_TZ).date())
+    return c
+
+
+def start(todo, mode=None):
+    response = client.post(f"/todos/{todo['id']}/timer", json={"mode": mode} if mode else None)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def stop():
+    response = client.post("/timer/stop")
+    assert response.status_code == 200, response.text
+    return response.json()["recorded_seconds"]
+
+
+def test_timer_idle_by_default(focus):
+    assert client.get("/timer").json()["running"] is False
+
+
+def test_timer_start_defaults_to_pomodoro(focus):
+    todo = create(title="코딩테스트 LV2")
+    timer = start(todo)
+    assert timer["running"] is True
+    assert (timer["todo_id"], timer["title"], timer["mode"]) == (todo["id"], "코딩테스트 LV2", "pomodoro")
+    assert timer["planned_seconds"] == 25 * 60
+    focus.advance(minutes=10)
+    assert client.get("/timer").json()["elapsed_seconds"] == 600   # 새로고침해도 서버가 이어서 센다
+
+
+def test_stop_records_time(focus):
+    todo = create()
+    start(todo, "free")
+    focus.advance(minutes=40)
+    assert stop() == 40 * 60
+    assert client.get("/timer").json()["running"] is False
+    assert client.get("/todos").json()[0]["study_seconds"] == 40 * 60
+    stats = client.get("/stats").json()
+    assert stats["study_today_seconds"] == 40 * 60
+    assert stats["recent"][-1]["study_seconds"] == 40 * 60
+
+
+def test_stop_without_timer_is_conflict(focus):
+    assert client.post("/timer/stop").status_code == 409
+
+
+def test_pomodoro_finishes_by_itself_at_25_minutes(focus):
+    start(create(), "pomodoro")
+    focus.advance(minutes=30)                    # 25분이 지나 자동 종료 — 넘긴 5분은 세지 않는다
+    assert client.get("/timer").json()["running"] is False
+    assert client.get("/stats").json()["study_today_seconds"] == 25 * 60
+    assert client.post("/timer/stop").status_code == 409
+
+
+def test_free_mode_caps_forgotten_timer(focus):
+    start(create(), "free")
+    focus.advance(hours=10)                      # 정지를 잊어도 4시간까지만 센다
+    assert client.get("/timer").json()["running"] is False
+    assert client.get("/stats").json()["study_total_seconds"] == main.MAX_FOCUS_SECONDS
+
+
+def test_running_timer_counts_in_stats(focus):
+    start(create(), "free")
+    focus.advance(minutes=15)
+    assert client.get("/stats").json()["study_today_seconds"] == 15 * 60   # 멈추기 전에도 지금까지 시간이 보인다
+
+
+def test_starting_another_todo_switches_timer(focus):
+    first, second = create(title="A"), create(title="B")
+    start(first, "free")
+    focus.advance(minutes=10)
+    timer = start(second, "free")                # 타이머는 하나 — A 는 10분으로 기록하고 B 로 바꾼다
+    assert timer["todo_id"] == second["id"]
+    focus.advance(minutes=5)
+    stop()
+    seconds = {t["title"]: t["study_seconds"] for t in client.get("/todos").json()}
+    assert seconds == {"A": 600, "B": 300}
+
+
+def test_timer_splits_across_midnight(focus):
+    focus.now = datetime(2026, 10, 7, 14, 30, tzinfo=timezone.utc)   # 한국 시간 23:30
+    start(create(), "free")
+    focus.advance(hours=1)                                           # 다음 날 00:30
+    stop()
+    days = {d["date"]: d["study_seconds"] for d in client.get("/stats").json()["recent"]}
+    assert days["2026-10-07"] == 30 * 60
+    assert days["2026-10-08"] == 30 * 60
+    calendar_days = {d["date"]: d["study_seconds"] for d in client.get("/calendar").json()["days"]}
+    assert calendar_days["2026-10-07"] == 30 * 60 and calendar_days["2026-10-08"] == 30 * 60
+
+
+@pytest.mark.parametrize("mode", ["", "sprint"])
+def test_timer_rejects_bad_mode(focus, mode):
+    todo = create()
+    assert client.post(f"/todos/{todo['id']}/timer", json={"mode": mode}).status_code == 422
+
+
+def test_timer_on_missing_or_others_todo(focus):
+    assert client.post("/todos/999/timer").status_code == 404
+    mine = create()
+    bob = new_user("bob")
+    assert bob.post(f"/todos/{mine['id']}/timer").status_code == 404   # 남의 할 일로는 시작할 수 없다
+    assert bob.get("/timer").json()["running"] is False
+
+
+def test_timers_are_per_user(focus):
+    start(create(), "free")
+    bob = new_user("bob")
+    assert bob.get("/timer").json()["running"] is False
+    focus.advance(minutes=20)
+    stop()
+    assert bob.get("/stats").json()["study_total_seconds"] == 0
+
+
+def test_deleting_todo_stops_its_timer_but_keeps_time(focus):
+    todo = create()
+    start(todo, "free")
+    focus.advance(minutes=12)
+    assert client.delete(f"/todos/{todo['id']}").status_code == 204
+    assert client.get("/timer").json()["running"] is False
+    assert client.get("/stats").json()["study_total_seconds"] == 12 * 60   # 공부한 시간은 통계에 남는다
+
+
+def test_client_cannot_set_study_seconds(focus):
+    todo = create()
+    updated = update(todo, study_seconds=99999)
+    assert updated["study_seconds"] == 0
+
+
+def test_delete_account_removes_study_logs(focus):
+    bob = new_user("bob")
+    todo = bob.post("/todos", json={"title": "bob"}).json()
+    bob.post(f"/todos/{todo['id']}/timer", json={"mode": "free"})
+    focus.advance(minutes=5)
+    assert bob.delete("/auth/me").status_code == 204
+    with closing(sqlite3.connect(main.DB_FILE)) as db:
+        assert db.execute("SELECT COUNT(*) FROM study_logs WHERE user_id = 2").fetchone()[0] == 0

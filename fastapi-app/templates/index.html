@@ -235,7 +235,8 @@
             padding: .6rem .8rem; font-size: .88rem; margin: 0 0 1rem;
         }
         /* 학습 통계 — 숫자 타일 2개 + 최근 7일 막대 */
-        .stats { display: grid; grid-template-columns: 1fr 1fr 2fr; gap: .5rem; margin-bottom: 1.25rem; }
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: .5rem; margin-bottom: 1.25rem; }
+        .stat.chart { grid-column: 1 / -1; }      /* 숫자 타일 3개가 위 줄, 날짜별 막대가 아래 줄 */
         .stat {
             display: flex; flex-direction: column; gap: .15rem; min-width: 0;
             background: var(--surface); border: 1px solid var(--line);
@@ -263,8 +264,8 @@
         .bar-col:first-child::after { left: 0; transform: none; }
         .bar-col:nth-child(n+6)::after { left: auto; right: 0; transform: none; }
         @media (max-width: 480px) {
-            .stats { grid-template-columns: 1fr 1fr; }
-            .stat.chart { grid-column: 1 / -1; }
+            .stats { grid-template-columns: repeat(3, 1fr); }
+            .stat-value { font-size: 1.1rem; }
         }
 
         /* 검색 · 태그 */
@@ -400,6 +401,46 @@
             .cal-item { font-size: .6rem; padding: 0 .15rem; }
             .cal-done { font-size: .58rem; padding: 0 .2rem; }
         }
+
+        /* 집중 타이머 */
+        .focus {
+            background: var(--surface); border: 1px solid var(--line);
+            border-radius: var(--radius); box-shadow: var(--shadow);
+            padding: .65rem .85rem; margin-bottom: 1rem;
+        }
+        .focus.running { border-color: #c7cbff; background: var(--accent-soft); }
+        .focus-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+        .focus-row[hidden] { display: none; }
+        .focus-icon { font-size: 1.1rem; }
+        .focus-hint { flex: 1; min-width: 10rem; font-size: .85rem; color: var(--muted); }
+        .focus-mode { font-size: .8rem; color: var(--muted); display: flex; align-items: center; gap: .35rem; }
+        .focus-mode select { padding: .25rem .45rem; font-size: .8rem; }
+        .focus-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+        .focus-label { font-size: .75rem; color: var(--accent); font-weight: 600; }
+        .focus-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .focus-clock {
+            font-size: 1.7rem; font-weight: 700; letter-spacing: -.02em;
+            font-variant-numeric: tabular-nums; color: var(--accent);
+        }
+        #focus-stop { padding: .45rem .9rem; font-weight: 600; background: var(--danger); color: #fff; }
+        #focus-stop:hover { background: #b42318; }
+        .focus-track { height: 4px; border-radius: 99px; background: #d7dbff; overflow: hidden; margin-top: .55rem; }
+        .focus-track[hidden] { display: none; }
+        .focus-fill { height: 100%; width: 0; background: var(--accent); transition: width 1s linear; }
+        .focus-done { display: block; font-size: .82rem; color: #067647; margin: .45rem 0 0; }
+        .focus-done[hidden] { display: none; }
+        .actions .focus-btn { color: var(--accent); }
+        .actions .focus-btn.on { background: var(--accent); color: #fff; font-weight: 600; }
+        .actions .focus-btn.on:hover { background: #4338ca; color: #fff; }
+        li.focusing { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow); }
+        .badge.study { color: #067647; background: #ecfdf3; border-color: #bfeccf; font-variant-numeric: tabular-nums; }
+        .cal-top { flex-wrap: wrap; }
+        .cal-study { font-size: .6rem; font-weight: 700; color: var(--accent); white-space: nowrap; }
+        @media (max-width: 480px) {
+            /* 버튼이 3개라 좁은 화면에서는 본문 아래 줄로 내린다 */
+            #todo-list > li { flex-wrap: wrap; }
+            #todo-list > li > .actions { flex-basis: 100%; justify-content: flex-end; }
+        }
     </style>
 </head>
 <body>
@@ -444,11 +485,38 @@
             <span class="stat-label">최근 7일 완료</span>
             <span class="stat-value" id="stat-recent">0개</span>
         </div>
+        <div class="stat" title="오늘 집중 타이머로 공부한 시간 (실행 중인 타이머 포함)">
+            <span class="stat-label">오늘 집중</span>
+            <span class="stat-value" id="stat-study">0분</span>
+        </div>
         <div class="stat chart">
-            <span class="stat-label">날짜별 완료</span>
+            <span class="stat-label">날짜별 완료 (막대에 마우스를 올리면 집중 시간도 보여요)</span>
             <div class="bars" id="stat-bars" aria-hidden="true"></div>
             <p class="sr-only" id="stat-summary">최근 7일 완료 기록</p>
         </div>
+    </section>
+
+    <section class="focus" id="focus" aria-label="집중 타이머">
+        <div class="focus-row" id="focus-idle">
+            <span class="focus-icon" aria-hidden="true">⏱</span>
+            <span class="focus-hint">할 일의 <strong>▶ 집중</strong> 버튼을 누르면 타이머가 시작돼요.</span>
+            <label class="focus-mode">방식
+                <select id="focus-mode">
+                    <option value="pomodoro" selected>포모도로 25분</option>
+                    <option value="free">자유 (직접 정지)</option>
+                </select>
+            </label>
+        </div>
+        <div class="focus-row" id="focus-running" hidden>
+            <div class="focus-info">
+                <span class="focus-label" id="focus-label">포모도로 · 집중 중</span>
+                <span class="focus-title" id="focus-title"></span>
+            </div>
+            <span class="focus-clock" id="focus-clock">25:00</span>
+            <button type="button" id="focus-stop">정지</button>
+        </div>
+        <div class="focus-track" id="focus-track" hidden><div class="focus-fill" id="focus-fill"></div></div>
+        <output class="focus-done" id="focus-done" hidden></output>
     </section>
 
     <div class="view-switch" id="view-switch" role="tablist" aria-label="보기 방식">
@@ -635,6 +703,7 @@
         }
 
         const load = () => run("목록 불러오기", async () => {
+          setTimer(await api("/timer"));        // 버튼 모양이 타이머 상태에 달려 있어 목록보다 먼저
           todos = await api("/todos");
           render();
           renderStats(await api("/stats"));
@@ -685,12 +754,16 @@
         function renderStats(stats) {
           $("stat-streak").textContent = `${stats.streak}일`;
           $("stat-recent").textContent = `${stats.recent_total}개`;
+          studyTodayBase = stats.study_today_seconds;   // 타이머가 도는 동안은 tick() 이 1초씩 더해 보여 준다
+          studyTodaySyncedAt = performance.now();
+          $("stat-study").textContent = formatDuration(studyTodayBase);
           const max = Math.max(1, ...stats.recent.map((day) => day.count));
           const summary = [];
           const columns = stats.recent.map((day) => {
             const [y, m, d] = day.date.split("-").map(Number);
             const weekday = WEEKDAYS[new Date(y, m - 1, d).getDay()];
-            const tip = `${m}/${d}(${weekday}) · ${day.count}개 완료`;
+            const studied = day.study_seconds ? ` · 집중 ${formatDuration(day.study_seconds)}` : "";
+            const tip = `${m}/${d}(${weekday}) · ${day.count}개 완료${studied}`;
             summary.push(tip);
 
             const bar = el("div", day.count ? "bar" : "bar zero");
@@ -778,6 +851,11 @@
           meta.append(progressBadge(todo));
           if (todo.repeat !== "none") meta.append(el("span", "badge rep", `↻ ${REPEAT[todo.repeat]}`));
           if (todo.due_date) meta.append(dueBadge(todo));
+          if (todo.study_seconds) {
+            const studied = el("span", "badge study", `⏱ ${formatDuration(todo.study_seconds)}`);
+            studied.title = "이 할 일에 집중한 시간 합계";
+            meta.append(studied);
+          }
           body.append(meta);
 
           if (todo.tags.length) {
@@ -788,13 +866,19 @@
           }
           body.append(subtaskList(todo));
 
+          const focusing = timer.running && timer.todo_id === todo.id;
+          const focusButton = focusing
+            ? button("■ 정지", "focus-btn on", stopFocus)
+            : button("▶ 집중", "focus-btn", () => startFocus(todo));
+          focusButton.title = focusing ? "집중 타이머 정지" : "이 할 일로 집중 타이머 시작";
           const actions = el("div", "actions");
           actions.append(
+            focusButton,
             button("수정", "edit", () => { editingId = todo.id; render(); }),
             button("삭제", "delete", () => remove(todo.id)),
           );
 
-          const li = el("li", rowClass(todo));
+          const li = el("li", `${rowClass(todo)}${focusing ? " focusing" : ""}`);
           li.append(check, body, actions);
           return li;
         }
@@ -1009,6 +1093,11 @@
             done.title = `이날 ${day.completed}번 완료`;
             top.append(done);
           }
+          if (day.study_seconds) {
+            const studied = el("span", "cal-study", `⏱${shortDuration(day.study_seconds)}`);
+            studied.title = `이날 ${formatDuration(day.study_seconds)} 집중`;
+            top.append(studied);
+          }
           cell.append(top, ...day.items.slice(0, MAX_CAL_ITEMS).map(calendarItem));
           if (day.items.length > MAX_CAL_ITEMS) {
             const more = el("span", "cal-more", `+${day.items.length - MAX_CAL_ITEMS}`);
@@ -1073,6 +1162,101 @@
         $("cal-prev").onclick = () => { calMonth = shiftMonth(calMonth, -1); loadCalendar(); };
         $("cal-next").onclick = () => { calMonth = shiftMonth(calMonth, 1); loadCalendar(); };
         $("cal-today").onclick = () => { calMonth = today().slice(0, 7); loadCalendar(); };
+
+        // ---------- 집중 타이머 ----------
+        // 타이머의 진짜 상태는 서버에 있다 (새로고침·다른 기기에서도 이어짐). 화면은 1초마다 시계만 넘긴다.
+        let timer = { running: false };
+        let timerSyncedAt = 0;                   // 서버 값을 받은 순간 (performance.now 기준)
+        let tickHandle = null;
+        let studyTodayBase = 0;
+        let studyTodaySyncedAt = 0;
+        let finishing = false;                   // 포모도로가 끝나 서버에 다시 묻는 중
+
+        function formatDuration(seconds) {
+          if (seconds < 60) return seconds ? `${seconds}초` : "0분";
+          const h = Math.floor(seconds / 3600);
+          const m = Math.floor((seconds % 3600) / 60);
+          if (!h) return `${m}분`;
+          return m ? `${h}시간 ${m}분` : `${h}시간`;
+        }
+
+        // 달력 칸처럼 좁은 곳용: 40m / 1.5h
+        const shortDuration = (seconds) => seconds < 3600
+          ? `${Math.max(1, Math.round(seconds / 60))}m`
+          : `${(seconds / 3600).toFixed(1).replace(/\.0$/, "")}h`;
+
+        const clock = (seconds) => {
+          const h = Math.floor(seconds / 3600);
+          const mm = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0");
+          const ss = String(seconds % 60).padStart(2, "0");
+          return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+        };
+
+        function elapsedNow() {
+          const passed = Math.floor((performance.now() - timerSyncedAt) / 1000);
+          return Math.min(timer.planned_seconds, timer.elapsed_seconds + passed);
+        }
+
+        function setTimer(next) {
+          timer = next;
+          timerSyncedAt = performance.now();
+          finishing = false;
+          clearInterval(tickHandle);
+          tickHandle = timer.running ? setInterval(tick, 1000) : null;
+          renderTimer();
+        }
+
+        function renderTimer() {
+          const running = timer.running;
+          $("focus").classList.toggle("running", running);
+          $("focus-idle").hidden = running;
+          $("focus-running").hidden = !running;
+          $("focus-track").hidden = !(running && timer.mode === "pomodoro");
+          if (running) {
+            $("focus-title").textContent = timer.title;
+            $("focus-label").textContent = timer.mode === "pomodoro" ? "포모도로 · 집중 중" : "자유 모드 · 집중 중";
+            $("focus-done").hidden = true;
+          } else {
+            document.title = "To-Do List";
+          }
+          tick();
+        }
+
+        function tick() {
+          if (!timer.running) return;
+          const elapsed = elapsedNow();
+          const pomodoro = timer.mode === "pomodoro";
+          const shown = pomodoro ? timer.planned_seconds - elapsed : elapsed;   // 포모도로는 남은 시간, 자유는 지난 시간
+          $("focus-clock").textContent = clock(shown);
+          $("focus-fill").style.width = `${(elapsed / timer.planned_seconds) * 100}%`;
+          document.title = `${clock(shown)} · ${timer.title}`;
+          $("stat-study").textContent = formatDuration(
+            studyTodayBase + Math.floor((performance.now() - studyTodaySyncedAt) / 1000));
+          if (elapsed >= timer.planned_seconds && !finishing) {   // 25분 끝 (자유 모드는 4시간 상한)
+            finishing = true;
+            const done = pomodoro ? "25분 집중 완료! 5분 쉬고 다시 시작해 보세요." : "최대 4시간이 지나 타이머를 멈췄어요.";
+            load().then(() => { $("focus-done").textContent = `✔ ${done}`; $("focus-done").hidden = false; });
+          }
+        }
+
+        function startFocus(todo) {
+          run("집중 시작", async () => {
+            await api(`/todos/${todo.id}/timer`, "POST", { mode: $("focus-mode").value });
+            // 다시 불러와야 바꾸기 전 할 일의 기록 시간과 "오늘 집중"의 기준 시각이 맞는다
+            await load();
+          });
+        }
+
+        function stopFocus() {
+          run("집중 정지", async () => {
+            const result = await api("/timer/stop", "POST");
+            await load();
+            $("focus-done").textContent = `✔ ${formatDuration(result.recorded_seconds)} 집중을 기록했어요.`;
+            $("focus-done").hidden = false;
+          });
+        }
+
+        $("focus-stop").onclick = stopFocus;
 
         function remove(id) {
           if (!confirm("정말 삭제할까요?")) return;
@@ -1146,6 +1330,8 @@
           activeTag = "";
           $("search").value = "";
           listEl.replaceChildren();
+          setTimer({ running: false });         // 화면만 비운다 — 서버의 타이머는 다시 로그인하면 이어진다
+          $("focus-done").hidden = true;
           view = "list";                         // 다음 사람은 목록 보기 · 이번 달부터
           calMonth = today().slice(0, 7);
           $("app").classList.remove("calendar-view");
