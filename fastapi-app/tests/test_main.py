@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import sys
 from contextlib import closing
@@ -979,3 +980,47 @@ def test_delete_account_removes_study_logs(focus):
     assert bob.delete("/auth/me").status_code == 204
     with closing(sqlite3.connect(main.DB_FILE)) as db:
         assert db.execute("SELECT COUNT(*) FROM study_logs WHERE user_id = 2").fetchone()[0] == 0
+
+
+# ---------- 액세스 로그 (Loki · #9) ----------
+
+@pytest.fixture
+def access_log():
+    # 액세스 로그를 메모리에 받아 본다 (실제로는 stdout → Docker → Alloy → Loki)
+    import io
+    import logging
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    main.access_logger.addHandler(handler)
+    yield stream
+    main.access_logger.removeHandler(handler)
+
+
+ACCESS_LINE = re.compile(r'^\S+ - "(?P<method>[A-Z]+) (?P<path>\S+) HTTP/1\.1" (?P<status>\d{3}) (?P<duration>\d+\.\d{3})s$')
+
+
+def test_access_log_one_line_per_request_in_loki_format(access_log):
+    client.get("/version")
+    todo = create()
+    client.get(f"/todos/{todo['id']}/missing")
+    lines = access_log.getvalue().splitlines()
+    parsed = [ACCESS_LINE.match(line) for line in lines]
+    assert all(parsed), lines                    # LogQL pattern `<ip> - "<method> <path> <_>" <status> <duration>` 과 같은 모양
+    assert [(m["method"], m["path"], m["status"]) for m in parsed] == [
+        ("GET", "/version", "200"),
+        ("POST", "/todos", "201"),
+        ("GET", f"/todos/{todo['id']}/missing", "404"),   # 없는 경로는 실제 주소 그대로
+    ]
+
+
+def test_access_log_groups_paths_by_route(access_log):
+    todo = create()
+    update(todo, title="바꾼 제목")
+    client.delete(f"/todos/{todo['id']}")
+    paths = [ACCESS_LINE.match(line)["path"] for line in access_log.getvalue().splitlines()]
+    assert paths == ["/todos", "/todos/{todo_id}", "/todos/{todo_id}"]   # id 마다 다른 경로가 생기지 않는다
+
+
+def test_uvicorn_access_log_disabled():
+    import logging
+    assert logging.getLogger("uvicorn.access").disabled is True   # 켜져 있으면 요청마다 두 줄 → 카운트 2배

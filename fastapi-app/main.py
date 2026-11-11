@@ -1,15 +1,18 @@
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import secrets
 import sqlite3
+import sys
 import threading
 from collections.abc import Iterator
 from contextlib import asynccontextmanager, closing, contextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from time import perf_counter                     # datetime 의 time 과 이름이 겹치지 않게 함수만 가져온다
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
@@ -637,6 +640,30 @@ app = FastAPI(
 # Prometheus 메트릭(/metrics) — 경로별 요청 수·응답 시간을 자동으로 기록한다
 # 로그인 없이 열려 있어야 Prometheus 가 가져갈 수 있다 (실습용. 운영에서는 프록시로 외부 접근을 막는다)
 Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+
+# 액세스 로그 — 요청마다 한 줄을 표준 출력(stdout)에 쓴다
+# Docker 가 stdout 을 컨테이너 로그로 저장하고, Alloy 가 그 로그를 읽어 Loki 로 보낸다 (앱은 Loki 를 모른다)
+access_logger = logging.getLogger("todo.access")
+access_logger.setLevel(logging.INFO)
+if not access_logger.handlers:                   # 테스트에서 여러 번 import 돼도 핸들러가 겹치지 않게
+    access_logger.addHandler(logging.StreamHandler(sys.stdout))
+access_logger.propagate = False                  # 상위 로거로 넘겨 두 번 찍히는 것을 막는다
+# uvicorn 기본 액세스 로그는 끈다 — 켜 두면 요청 하나에 두 줄이 남아 Loki 대시보드 카운트가 2배가 된다
+logging.getLogger("uvicorn.access").disabled = True
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    started = perf_counter()
+    response = await call_next(request)
+    duration = perf_counter() - started
+    # 경로는 라우트 모양으로 남긴다 (/todos/17 → /todos/{todo_id}) — 할 일 id 마다 그래프 선이 생기지 않게
+    route = request.scope.get("route")
+    path = getattr(route, "path", None) or request.url.path
+    client = request.client.host if request.client else "-"
+    # 형식: IP - "METHOD PATH HTTP/1.1" 상태코드 응답시간 — Grafana 의 LogQL pattern 이 이 형식으로 나눠 읽는다
+    access_logger.info(f'{client} - "{request.method} {path} HTTP/1.1" {response.status_code} {duration:.3f}s')
+    return response
 
 
 @app.middleware("http")

@@ -1,0 +1,41 @@
+// Grafana Alloy 설정 — FastApi-app 컨테이너의 로그를 읽어 Loki 로 보낸다
+// 컨테이너 찾기 → 라벨 정리 → 로그 읽기 → Loki 로 전송 (컴포넌트를 targets · forward_to 로 이어 붙인다)
+
+// ① 수집 대상 찾기: Docker 소켓으로 실행 중인 컨테이너를 조회하고,
+//    docker compose 서비스 이름이 fastapi-app 인 컨테이너만 남긴다
+discovery.docker "fastapi" {
+  host = "unix:///var/run/docker.sock"
+
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.service=fastapi-app"]
+  }
+}
+
+// ② 라벨 정리: 컨테이너 이름("/FastApi-app")의 앞 '/' 를 떼고 container 라벨로 저장
+discovery.relabel "fastapi" {
+  targets = []
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+// ③ 로그 읽기: 컨테이너의 stdout/stderr 로그를 계속 읽어(tail) 다음 단계로 넘긴다
+//    application="fastapi" 라벨을 붙여 LogQL 에서 {application="fastapi"} 로 찾는다
+loki.source.docker "fastapi" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.fastapi.targets
+  labels        = {"application" = "fastapi"}
+  relabel_rules = discovery.relabel.fastapi.rules
+  forward_to    = [loki.write.local.receiver]
+}
+
+// ④ 전송: Loki 의 Push API 로 로그를 밀어 넣는다
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
